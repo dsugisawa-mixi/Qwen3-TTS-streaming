@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoXMiX — Voice Design + Streaming</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #f5f5f5; color: #333; }
+  .container { max-width: 840px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { margin-bottom: .3rem; }
+  h2 { margin: 1.5rem 0 .8rem; font-size: 1.15rem; border-bottom: 2px solid #2563eb; padding-bottom: .3rem; }
+  .info { color: #666; margin-bottom: 1rem; font-size: .9rem; }
+  label { display: block; font-weight: 600; margin: .6rem 0 .2rem; }
+  input[type=text], textarea, select {
+    width: 100%; padding: .45rem; border: 1px solid #ccc; border-radius: 4px; font-size: .95rem;
+  }
+  textarea { resize: vertical; min-height: 70px; }
+  button {
+    margin-top: .8rem; padding: .5rem 1.5rem; background: #2563eb; color: #fff;
+    border: none; border-radius: 4px; font-size: .95rem; cursor: pointer;
+  }
+  button:hover { background: #1d4ed8; }
+  button:disabled { background: #93b4f5; cursor: wait; }
+  .status { margin-top: .5rem; font-size: .85rem; color: #666; min-height: 1.2em; }
+  audio { margin-top: .8rem; width: 100%; }
+  .hidden { display: none; }
+
+  /* mic button */
+  #mic-btn.recording { background: #dc2626; animation: mic-pulse 1s infinite; }
+  @keyframes mic-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,.4); }
+    50% { box-shadow: 0 0 0 10px rgba(220,38,38,0); }
+  }
+
+  /* accordion */
+  .acc-item { border: 1px solid #ddd; border-radius: 6px; margin-bottom: .5rem; background: #fff; overflow: hidden; }
+  .acc-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: .6rem .8rem; cursor: pointer; user-select: none; background: #fafafa;
+  }
+  .acc-header:hover { background: #f0f0f0; }
+  .acc-title { font-weight: 600; font-size: .95rem; }
+  .acc-summary { font-size: .85rem; color: #666; }
+  .acc-arrow { transition: transform .2s; font-size: .8rem; color: #999; }
+  .acc-item.open > .acc-header .acc-arrow { transform: rotate(90deg); }
+  .acc-body { display: none; padding: .5rem .8rem .8rem; border-top: 1px solid #eee; }
+  .acc-item.open > .acc-body { display: block; }
+
+  /* design section */
+  #design-section > .acc-header { padding: .5rem .8rem; background: #fff; border-bottom: 2px solid #2563eb; }
+  #design-section > .acc-header:hover { background: #f8fafc; }
+  #design-section > .acc-header .acc-title { font-size: 1.15rem; }
+  .instruct-display {
+    font-size: .85rem; background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px;
+    padding: .6rem; white-space: pre-wrap; line-height: 1.5; color: #444;
+    max-height: 300px; overflow-y: auto;
+  }
+
+  /* ref audio grid */
+  .ref-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; margin-top: .5rem; }
+  .ref-card {
+    border: 1px solid #ddd; border-radius: 6px; padding: .6rem; background: #f9f9f9;
+  }
+  .ref-card h4 { font-size: .85rem; margin-bottom: .3rem; color: #2563eb; }
+  .ref-card audio { width: 100%; height: 32px; }
+  .ref-card .not-available { color: #dc2626; font-size: .85rem; }
+
+  /* generate section */
+  .gen-row { display: flex; gap: .8rem; align-items: flex-end; flex-wrap: wrap; }
+  .gen-row > * { flex: 1; min-width: 150px; }
+
+  @media (max-width: 600px) {
+    .ref-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>VoXMiX — Voice Design</h1>
+  <p class="info">Model: <code id="model-kind">loading...</code></p>
+
+  <!-- ==================== Voice Design Section ==================== -->
+  <div class="acc-item" id="design-section" style="margin-top:1rem;">
+    <div class="acc-header" onclick="toggleDesignSection()">
+      <div style="display:flex;align-items:center;gap:.6rem;">
+        <span class="acc-arrow" id="design-arrow">&#9654;</span>
+        <span class="acc-title">1. Designed Voice References</span>
+      </div>
+      <div class="acc-summary" id="design-summary"></div>
+    </div>
+    <div class="acc-body">
+      <label>Style Instructions (for VoiceDesign emotion)</label>
+      <div id="control-instruct"></div>
+
+      <!-- Per-language accordion for reference audio -->
+      <label style="margin-top:1rem;">Reference Audio</label>
+      <div class="accordion" id="ref-accordion"></div>
+    </div>
+  </div>
+
+  <!-- ==================== Generate Section ==================== -->
+  <h2>2. Streaming TTS</h2>
+
+  <div class="gen-row">
+    <div>
+      <label for="gen-style">Style</label>
+      <select id="gen-style"></select>
+    </div>
+    <div>
+      <label for="gen-out-lang">Output Language</label>
+      <select id="gen-out-lang">
+        <option value="en" selected>English</option>
+        <option value="ja">Japanese</option>
+        <option value="ch">Chinese</option>
+      </select>
+    </div>
+  </div>
+
+  <div style="display:flex;align-items:flex-end;gap:.5rem;margin-top:.6rem;">
+    <div style="flex:1;">
+      <label for="gen-text">Text</label>
+      <textarea id="gen-text" placeholder="Enter text to synthesize, or use the microphone for speech input..."></textarea>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:.3rem;align-items:center;padding-bottom:4px;">
+      <button type="button" id="mic-btn" onclick="toggleASR()" title="Speech input"
+        style="width:44px;height:44px;border-radius:50%;font-size:1.3rem;padding:0;margin:0;display:flex;align-items:center;justify-content:center;">
+        <span id="mic-icon">&#127908;</span>
+      </button>
+    </div>
+  </div>
+
+  <button id="gen-btn" onclick="doSmartGenerate()">Generate</button>
+  <div class="status" id="gen-status"></div>
+  <audio id="player" controls class="hidden"></audio>
+</div>
+
+
+<script>
+// =========================================================================
+// Utilities
+// =========================================================================
+const $ = s => document.querySelector(s);
+
+const LANG_LABELS = {en: 'English', ja: 'Japanese', ch: 'Chinese'};
+const STYLE_LABELS = {
+  neutral: 'Neutral',
+  bright:  'Bright',
+  calm:    'Calm',
+  angry:   'Angry',
+};
+
+let serverStyles = [];
+let serverLangs = [];
+let cachedKeys = [];
+// =========================================================================
+// Init
+// =========================================================================
+async function init() {
+  const r = await fetch('/api/info');
+  const info = await r.json();
+  $('#model-kind').textContent = info.model_kind;
+
+  serverStyles = info.styles || ['neutral', 'bright', 'calm', 'angry'];
+  serverLangs = info.langs || ['ja', 'en', 'ch'];
+  cachedKeys = info.cached_keys || [];
+
+  // Show per-style control instructions
+  renderStyleInstructions(info.style_instructions || {});
+
+  // Build style dropdown
+  $('#gen-style').innerHTML = serverStyles.map(s =>
+    `<option value="${s}">${STYLE_LABELS[s] || s}</option>`
+  ).join('');
+
+  // Build reference audio accordion per language
+  renderRefAccordion();
+
+  // Summary badge
+  updateDesignSummary();
+}
+
+// =========================================================================
+// Design Section
+// =========================================================================
+function toggleDesignSection() {
+  $('#design-section').classList.toggle('open');
+}
+
+function updateDesignSummary() {
+  const total = serverStyles.length * serverLangs.length;
+  const ready = cachedKeys.length;
+  const el = $('#design-summary');
+  if (ready === total) {
+    el.innerHTML = `<span style="color:#16a34a;font-weight:600;">${ready}/${total} ready</span>`;
+  } else {
+    el.innerHTML = `<span style="color:#d97706;font-weight:600;">${ready}/${total} ready</span>`;
+  }
+}
+
+function renderStyleInstructions(styleInstructions) {
+  const container = $('#control-instruct');
+  const styles = Object.keys(styleInstructions);
+  if (styles.length === 0) {
+    container.innerHTML = '<div class="instruct-display">(not set)</div>';
+    return;
+  }
+  container.innerHTML = styles.map(style => {
+    const label = STYLE_LABELS[style] || style;
+    const text = styleInstructions[style] || '';
+    return `
+      <div class="acc-item" id="instruct-${style}">
+        <div class="acc-header" onclick="document.getElementById('instruct-${style}').classList.toggle('open')">
+          <div style="display:flex;align-items:center;gap:.6rem;">
+            <span class="acc-arrow">&#9654;</span>
+            <span class="acc-title">${label}</span>
+          </div>
+        </div>
+        <div class="acc-body">
+          <div class="instruct-display">${text.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function toggleRefLang(langId) {
+  const el = document.getElementById('ref-' + langId);
+  if (el) el.classList.toggle('open');
+}
+
+function renderRefAccordion() {
+  const container = $('#ref-accordion');
+  container.innerHTML = serverLangs.map(lang => {
+    const label = LANG_LABELS[lang] || lang;
+
+    // Count available for this lang
+    const langKeys = cachedKeys.filter(k => k.startsWith(lang + '/'));
+    const countStr = `${langKeys.length}/${serverStyles.length}`;
+
+    const cards = serverStyles.map(style => {
+      const key = `${lang}/${style}`;
+      const available = cachedKeys.includes(key);
+      const styleLabel = STYLE_LABELS[style] || style;
+      if (!available) {
+        return `<div class="ref-card"><h4>${styleLabel}</h4><span class="not-available">Not available</span></div>`;
+      }
+      const designedSrc = `/api/reference_audio?lang=${lang}&style=${style}`;
+      return `<div class="ref-card">
+        <h4>${styleLabel}</h4>
+        <audio controls src="${designedSrc}"></audio>
+      </div>`;
+    }).join('');
+
+    return `
+      <div class="acc-item" id="ref-${lang}">
+        <div class="acc-header" onclick="toggleRefLang('${lang}')">
+          <div style="display:flex;align-items:center;gap:.6rem;">
+            <span class="acc-arrow">&#9654;</span>
+            <span class="acc-title">${label}</span>
+          </div>
+          <div class="acc-summary">${countStr}</div>
+        </div>
+        <div class="acc-body">
+          <div class="ref-grid">${cards}</div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// =========================================================================
+// Streaming playback (Web Audio API)
+// =========================================================================
+let currentAbortController = null;
+
+function createWavBlob(allSamples, sampleRate) {
+  const numSamples = allSamples.length;
+  const bytesPerSample = 2;
+  const dataSize = numSamples * bytesPerSample;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  view.setUint32(0, 0x52494646, false);
+  view.setUint32(4, 36 + dataSize, true);
+  view.setUint32(8, 0x57415645, false);
+
+  view.setUint32(12, 0x666d7420, false);
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * bytesPerSample, true);
+  view.setUint16(32, bytesPerSample, true);
+  view.setUint16(34, 16, true);
+
+  view.setUint32(36, 0x64617461, false);
+  view.setUint32(40, dataSize, true);
+
+  const output = new Int16Array(buffer, 44);
+  output.set(allSamples);
+
+  return new Blob([buffer], {type: 'audio/wav'});
+}
+
+async function playStreamingResponse(response, genStartTime) {
+  const sampleRate = parseInt(response.headers.get('X-Sample-Rate') || '24000', 10);
+  const reader = response.body.getReader();
+
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)({sampleRate});
+  let nextStartTime = 0;
+  let allInt16Samples = [];
+  let leftover = null;
+  let chunkCount = 0;
+  const t0 = genStartTime || performance.now();
+  let tFirst = null;
+
+  try {
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+
+      let bytes;
+      if (leftover) {
+        bytes = new Uint8Array(leftover.length + value.length);
+        bytes.set(leftover, 0);
+        bytes.set(value, leftover.length);
+        leftover = null;
+      } else {
+        bytes = value;
+      }
+
+      const usableLen = bytes.length & ~1;
+      if (bytes.length > usableLen) {
+        leftover = bytes.slice(usableLen);
+      }
+      if (usableLen === 0) continue;
+
+      const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, usableLen / 2);
+      allInt16Samples.push(Int16Array.from(int16));
+
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) {
+        float32[i] = int16[i] / 32768;
+      }
+
+      const audioBuffer = audioCtx.createBuffer(1, float32.length, sampleRate);
+      audioBuffer.getChannelData(0).set(float32);
+      const source = audioCtx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioCtx.destination);
+
+      const startTime = Math.max(audioCtx.currentTime, nextStartTime);
+      source.start(startTime);
+      nextStartTime = startTime + audioBuffer.duration;
+
+      chunkCount++;
+      if (tFirst === null) {
+        tFirst = performance.now();
+        const latency = ((tFirst - t0) / 1000).toFixed(2);
+        $('#gen-status').textContent = `Latency: ${latency}s — Streaming...`;
+      } else {
+        const latency = ((tFirst - t0) / 1000).toFixed(2);
+        $('#gen-status').textContent = `Latency: ${latency}s — Streaming... ${chunkCount} chunks`;
+      }
+    }
+  } finally {
+    const totalLen = allInt16Samples.reduce((s, a) => s + a.length, 0);
+    const merged = new Int16Array(totalLen);
+    let offset = 0;
+    for (const arr of allInt16Samples) {
+      merged.set(arr, offset);
+      offset += arr.length;
+    }
+
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+    const audioDuration = (totalLen / sampleRate).toFixed(1);
+
+    if (totalLen > 0) {
+      const wavBlob = createWavBlob(merged, sampleRate);
+      const url = URL.createObjectURL(wavBlob);
+      const player = $('#player');
+      player.src = url;
+      player.classList.remove('hidden');
+    }
+
+    const latency = tFirst ? ((tFirst - t0) / 1000).toFixed(2) : '-';
+    $('#gen-status').textContent = `Done in ${elapsed}s — Latency: ${latency}s (${audioDuration}s audio, ${chunkCount} chunks)`;
+
+    const remainingTime = Math.max(0, nextStartTime - audioCtx.currentTime);
+    setTimeout(() => audioCtx.close().catch(() => {}), (remainingTime + 0.5) * 1000);
+  }
+}
+
+// =========================================================================
+// ASR (Web Speech API)
+// =========================================================================
+let asrRecognition = null;
+let asrRunning = false;
+
+function toggleASR() {
+  if (asrRunning) {
+    stopASR(true);
+  } else {
+    startASR();
+  }
+}
+
+const LANG_TO_ASR = {en: 'en-US', ja: 'ja-JP', ch: 'zh-CN'};
+
+function startASR() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    alert('This browser does not support speech recognition. Please use Chrome.');
+    return;
+  }
+
+  const lang = LANG_TO_ASR[$('#gen-out-lang').value] || 'en-US';
+  asrRecognition = new SpeechRecognition();
+  asrRecognition.lang = lang;
+  asrRecognition.continuous = true;
+  asrRecognition.interimResults = true;
+
+  $('#gen-text').value = '';
+  let finalText = '';
+
+  asrRecognition.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const t = e.results[i][0].transcript;
+      if (e.results[i].isFinal) {
+        finalText += t;
+      } else {
+        interim += t;
+      }
+    }
+    $('#gen-text').value = finalText + interim;
+  };
+
+  asrRecognition.onerror = (e) => {
+    if (e.error !== 'aborted') {
+      console.error('ASR error:', e.error);
+    }
+    stopASR();
+  };
+
+  asrRecognition.onend = () => {
+    if (asrRunning) {
+      try { asrRecognition.start(); } catch(e) { stopASR(); }
+    }
+  };
+
+  asrRecognition.start();
+  asrRunning = true;
+  $('#mic-btn').classList.add('recording');
+  $('#mic-icon').textContent = '\u23F9';
+}
+
+function stopASR(userTriggered = false) {
+  asrRunning = false;
+  if (asrRecognition) {
+    try { asrRecognition.abort(); } catch(e) {}
+    asrRecognition = null;
+  }
+  $('#mic-btn').classList.remove('recording');
+  $('#mic-icon').innerHTML = '&#127908;';
+
+  releaseMicrophone();
+
+  if (userTriggered && $('#gen-text').value.trim()) {
+    doSmartGenerate();
+  }
+}
+
+function releaseMicrophone() {
+  navigator.mediaDevices.getUserMedia({audio: true})
+    .then(stream => stream.getTracks().forEach(t => t.stop()))
+    .catch(() => {});
+}
+
+// =========================================================================
+// Generate (direct stream, no translation)
+// =========================================================================
+async function doSmartGenerate() {
+  const style = $('#gen-style').value;
+  const outLang = $('#gen-out-lang').value;
+  const text = $('#gen-text').value.trim();
+
+  if (!text) { $('#gen-status').textContent = 'Please enter text'; return; }
+
+  const genStartTime = performance.now();
+
+  if (currentAbortController) {
+    currentAbortController.abort();
+    currentAbortController = null;
+  }
+
+  const btn = $('#gen-btn');
+  btn.disabled = true;
+  $('#player').classList.add('hidden');
+
+  try {
+    $('#gen-status').textContent = 'Generating...';
+    currentAbortController = new AbortController();
+    const gr = await fetch('/api/generate_stream', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        style: style,
+        out_lang: outLang,
+        text: text,
+      }),
+      signal: currentAbortController.signal,
+    });
+    if (!gr.ok) {
+      const e = await gr.json().catch(() => ({error: gr.statusText}));
+      $('#gen-status').textContent = 'Error: ' + (e.error || gr.statusText);
+      return;
+    }
+
+    await playStreamingResponse(gr, genStartTime);
+    currentAbortController = null;
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      $('#gen-status').textContent = 'Cancelled';
+    } else {
+      $('#gen-status').textContent = 'Error: ' + e.message;
+    }
+  } finally {
+    btn.disabled = false;
+    currentAbortController = null;
+  }
+}
+
+// =========================================================================
+// Boot
+// =========================================================================
+init();
+</script>
+</body>
+</html>
