@@ -196,7 +196,12 @@
 
   <button id="gen-btn" onclick="doSmartGenerate()">Generate</button>
   <div class="status" id="gen-status"></div>
-  <audio id="player" controls class="hidden"></audio>
+  <div style="display:flex;align-items:center;gap:.8rem;margin-top:.8rem;">
+    <audio id="player" controls class="hidden" style="flex:1;margin:0;"></audio>
+    <label id="loop-label" class="hidden" style="display:none;align-items:center;gap:.3rem;font-size:.85rem;white-space:nowrap;cursor:pointer;">
+      <input type="checkbox" id="loop-check" onchange="$('#player').loop = this.checked"> ループ再生
+    </label>
+  </div>
 </div>
 
 <div class="toast-container" id="toast-container"></div>
@@ -568,6 +573,7 @@ async function doGenerate() {
   btn.disabled = true;
   $('#gen-status').textContent = 'Generating...';
   $('#player').classList.add('hidden');
+  $('#loop-label').style.display = 'none';
 
   try {
     const t0 = performance.now();
@@ -586,7 +592,9 @@ async function doGenerate() {
     const url = URL.createObjectURL(blob);
     const player = $('#player');
     player.src = url;
+    player.loop = $('#loop-check').checked;
     player.classList.remove('hidden');
+    $('#loop-label').style.display = 'flex';
     $('#gen-status').textContent = `Done in ${elapsed}s`;
   } catch (e) {
     $('#gen-status').textContent = 'Error: ' + e.message;
@@ -719,7 +727,9 @@ async function playStreamingResponse(response, genStartTime) {
       const url = URL.createObjectURL(wavBlob);
       const player = $('#player');
       player.src = url;
+      player.loop = $('#loop-check').checked;
       player.classList.remove('hidden');
+      $('#loop-label').style.display = 'flex';
     }
 
     const latency = tFirst ? ((tFirst - t0) / 1000).toFixed(2) : '-';
@@ -889,6 +899,7 @@ async function doSmartGenerate() {
   const btn = $('#gen-btn');
   btn.disabled = true;
   $('#player').classList.add('hidden');
+  $('#loop-label').style.display = 'none';
 
   let genText = text;
 
