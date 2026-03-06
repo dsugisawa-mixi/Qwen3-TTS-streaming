@@ -266,12 +266,23 @@ DESIGNED_DIR = Path("./designed_references")
 TTS: Qwen3TTSModel = None
 MODEL_KIND: str = ""
 
-# The active style instructions (for /api/info)
+# Design model config (saved for runtime reloading)
+DESIGN_MODEL_PATH: str = ""
+DEVICE: str = "cuda:0"
+DTYPE = torch.bfloat16
+ATTN: str | None = "flash_attention_2"
+BASE_MODEL_PATH: str = ""
+
+# The active style instructions (mutable at runtime via API)
 ACTIVE_STYLE_INSTRUCTIONS: dict = {}
 
 # Clone prompts: key = "{lang}/{style}" -> list[VoiceClonePromptItem]
 # Each list contains 1 item: designed voice ICL prompt
 CLONE_PROMPTS: dict = {}
+
+# Lock to prevent concurrent regeneration (heavy GPU operation)
+REGEN_LOCK = threading.Lock()
+REGEN_STATUS: dict = {"busy": False, "message": ""}
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +411,104 @@ def build_clone_prompts():
 
 
 # ---------------------------------------------------------------------------
+# Runtime regeneration (called when style instructions are edited via UI)
+# ---------------------------------------------------------------------------
+
+def regenerate_style(style: str):
+    """Regenerate designed voice reference for one style across all languages.
+
+    This is a heavy operation:
+      1. Unload Base model
+      2. Load VoiceDesign model
+      3. Regenerate audio for the given style (all langs)
+      4. Unload VoiceDesign model
+      5. Reload Base model
+      6. Rebuild ALL ICL prompts (Base model was reloaded)
+    """
+    global TTS, MODEL_KIND
+
+    if not DESIGN_MODEL_PATH:
+        raise RuntimeError("No VoiceDesign model configured (--design-model was 'none')")
+
+    REGEN_STATUS["busy"] = True
+    try:
+        # 1. Unload Base model
+        REGEN_STATUS["message"] = "Unloading Base model..."
+        print(f"[regen] Unloading Base model for style={style} regeneration...")
+        del TTS
+        TTS = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # 2. Load VoiceDesign model
+        REGEN_STATUS["message"] = "Loading VoiceDesign model..."
+        print(f"[regen] Loading VoiceDesign model: {DESIGN_MODEL_PATH}")
+        tts_design = Qwen3TTSModel.from_pretrained(
+            DESIGN_MODEL_PATH,
+            device_map=DEVICE,
+            dtype=DTYPE,
+            attn_implementation=ATTN,
+        )
+
+        # 3. Regenerate audio for this style across all languages
+        total = len(LANGS)
+        for i, lang in enumerate(LANGS):
+            lang_dir = DESIGNED_DIR / lang
+            lang_dir.mkdir(parents=True, exist_ok=True)
+            wav_path = _designed_wav_path(lang, style)
+            ref_text = DESIGN_REF_TEXTS[lang][style]
+            model_lang = LANG_TO_MODEL[lang]
+            instruct = ACTIVE_STYLE_INSTRUCTIONS[style]
+
+            REGEN_STATUS["message"] = f"Generating {lang}/{style} ({i+1}/{total})..."
+            print(f"[regen] [{i+1}/{total}] Generating {lang}/{style} ({model_lang}) ...")
+            t0 = time.time()
+            wavs, sr = tts_design.generate_voice_design(
+                text=ref_text,
+                instruct=instruct,
+                language=model_lang,
+            )
+            elapsed = time.time() - t0
+            sf.write(str(wav_path), wavs[0], sr)
+            duration = len(wavs[0]) / sr
+            print(f"[regen]   Saved {wav_path} ({elapsed:.2f}s, {duration:.1f}s audio, {sr}Hz)")
+
+        # Update instruct.txt fingerprint
+        instruct_file = DESIGNED_DIR / "instruct.txt"
+        fingerprint = _instructions_fingerprint(ACTIVE_STYLE_INSTRUCTIONS)
+        instruct_file.write_text(fingerprint, encoding="utf-8")
+
+        # 4. Unload VoiceDesign model
+        REGEN_STATUS["message"] = "Unloading VoiceDesign model..."
+        del tts_design
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print("[regen] VoiceDesign model unloaded.")
+
+        # 5. Reload Base model
+        REGEN_STATUS["message"] = "Reloading Base model..."
+        print(f"[regen] Reloading Base model: {BASE_MODEL_PATH}")
+        TTS = Qwen3TTSModel.from_pretrained(
+            BASE_MODEL_PATH,
+            device_map=DEVICE,
+            dtype=DTYPE,
+            attn_implementation=ATTN,
+        )
+        MODEL_KIND = getattr(TTS.model, "tts_model_type", "base")
+
+        # 6. Rebuild ALL ICL prompts (Base model was reloaded)
+        REGEN_STATUS["message"] = "Rebuilding ICL prompts..."
+        print("[regen] Rebuilding all ICL prompts...")
+        CLONE_PROMPTS.clear()
+        build_clone_prompts()
+        print(f"[regen] Done. {len(CLONE_PROMPTS)} prompts ready.")
+
+    finally:
+        REGEN_STATUS["busy"] = False
+        REGEN_STATUS["message"] = ""
+
+
+# ---------------------------------------------------------------------------
 # HTML — loaded from server-design.html at startup
 # ---------------------------------------------------------------------------
 INDEX_HTML: str = ""
@@ -455,6 +564,8 @@ class TTSHandler(BaseHTTPRequestHandler):
             self._handle_reference_audio(qs)
         elif path == "/api/stats":
             self._handle_stats()
+        elif path == "/api/regen_status":
+            self._send_json(REGEN_STATUS)
         else:
             self.send_error(404)
 
@@ -465,6 +576,8 @@ class TTSHandler(BaseHTTPRequestHandler):
                 self._handle_generate()
             elif path == "/api/generate_stream":
                 self._handle_generate_stream()
+            elif path == "/api/update_instruction":
+                self._handle_update_instruction()
             else:
                 self.send_error(404)
         except Exception as e:
@@ -507,6 +620,44 @@ class TTSHandler(BaseHTTPRequestHandler):
             "stream_total": PERF_STREAM_TOTAL.to_dict(),
             "stream_first_chunk": PERF_STREAM_FIRST.to_dict(),
         })
+
+    def _handle_update_instruction(self):
+        body = self._read_json_body()
+        style = body.get("style", "").strip()
+        instruction = body.get("instruction", "").strip()
+
+        if style not in STYLES:
+            self._send_json({"error": f"Invalid style: {style}"}, 400)
+            return
+        if not instruction:
+            self._send_json({"error": "Instruction text is empty"}, 400)
+            return
+
+        if REGEN_STATUS["busy"]:
+            self._send_json({"error": "Regeneration already in progress"}, 409)
+            return
+
+        if not REGEN_LOCK.acquire(blocking=False):
+            self._send_json({"error": "Regeneration already in progress"}, 409)
+            return
+
+        try:
+            # Update the active instruction
+            ACTIVE_STYLE_INSTRUCTIONS[style] = instruction
+            print(f"[update] Style '{style}' instruction updated ({len(instruction)} chars)")
+
+            # Regenerate in the request thread (blocking — client polls /api/regen_status)
+            regenerate_style(style)
+
+            self._send_json({
+                "status": "ok",
+                "style": style,
+                "cached_keys": sorted(CLONE_PROMPTS.keys()),
+            })
+        except Exception as e:
+            self._send_json({"error": f"Regeneration failed: {type(e).__name__}: {e}"}, 500)
+        finally:
+            REGEN_LOCK.release()
 
     def _handle_generate(self):
         body = self._read_json_body()
@@ -640,6 +791,7 @@ class TTSHandler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 def main():
     global TTS, MODEL_KIND, INDEX_HTML, ACTIVE_STYLE_INSTRUCTIONS
+    global DESIGN_MODEL_PATH, DEVICE, DTYPE, ATTN, BASE_MODEL_PATH
 
     # Load HTML from server-design.html
     html_path = Path(__file__).parent / "server-design.html"
@@ -661,7 +813,18 @@ def main():
                         help="Force regeneration of designed reference audio")
     args = parser.parse_args()
 
-    ACTIVE_STYLE_INSTRUCTIONS = STYLE_INSTRUCTIONS
+    ACTIVE_STYLE_INSTRUCTIONS = dict(STYLE_INSTRUCTIONS)  # mutable copy
+
+    dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
+    attn = None if args.no_flash_attn else "flash_attention_2"
+
+    # Save config globals for runtime reloading
+    DEVICE = args.device
+    DTYPE = dtype_map[args.dtype]
+    ATTN = attn
+    BASE_MODEL_PATH = args.model
+    if args.design_model and args.design_model.lower() != "none":
+        DESIGN_MODEL_PATH = args.design_model
 
     print(f"[config] {len(ACTIVE_STYLE_INSTRUCTIONS)} style instructions:")
     for style, instruct in ACTIVE_STYLE_INSTRUCTIONS.items():
@@ -669,13 +832,10 @@ def main():
         print(f"  [{style}] {line_count} lines")
     print(f"[config] {len(STYLES)} styles x {len(LANGS)} langs = {len(STYLES)*len(LANGS)} combinations")
 
-    dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
-    attn = None if args.no_flash_attn else "flash_attention_2"
-
     # Step 1: Design emotional voice references (VoiceDesign model)
     if args.design_model and args.design_model.lower() != "none":
         design_voice(
-            args.design_model, args.device, dtype_map[args.dtype], attn,
+            DESIGN_MODEL_PATH, DEVICE, DTYPE, ATTN,
             ACTIVE_STYLE_INSTRUCTIONS, force=args.force_redesign,
         )
     else:
@@ -692,12 +852,12 @@ def main():
         print(f"[design] Run with a --design-model to generate them.")
 
     # Step 2: Load Base model for streaming
-    print(f"Loading Base model: {args.model} on {args.device} ({args.dtype}) ...")
+    print(f"Loading Base model: {BASE_MODEL_PATH} on {DEVICE} ...")
     TTS = Qwen3TTSModel.from_pretrained(
-        args.model,
-        device_map=args.device,
-        dtype=dtype_map[args.dtype],
-        attn_implementation=attn,
+        BASE_MODEL_PATH,
+        device_map=DEVICE,
+        dtype=DTYPE,
+        attn_implementation=ATTN,
     )
     MODEL_KIND = getattr(TTS.model, "tts_model_type", "base")
     print(f"Base model loaded. type={MODEL_KIND}")

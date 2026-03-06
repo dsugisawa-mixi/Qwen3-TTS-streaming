@@ -56,6 +56,26 @@
     padding: .6rem; white-space: pre-wrap; line-height: 1.5; color: #444;
     max-height: 300px; overflow-y: auto;
   }
+  .instruct-textarea {
+    font-size: .85rem; font-family: monospace; background: #fff; border: 1px solid #ccc;
+    border-radius: 4px; padding: .6rem; line-height: 1.5; color: #333;
+    width: 100%; min-height: 180px; resize: vertical;
+  }
+  .save-btn {
+    margin-top: .4rem; padding: .35rem 1rem; background: #16a34a; color: #fff;
+    border: none; border-radius: 4px; font-size: .85rem; cursor: pointer;
+  }
+  .save-btn:hover { background: #15803d; }
+  .save-btn:disabled { background: #86efac; cursor: wait; }
+  .regen-status {
+    display: inline-block; margin-left: .6rem; font-size: .85rem; color: #d97706;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner {
+    display: inline-block; width: 14px; height: 14px; border: 2px solid #d97706;
+    border-top-color: transparent; border-radius: 50%; animation: spin .8s linear infinite;
+    vertical-align: middle; margin-right: .3rem;
+  }
 
   /* ref audio grid */
   .ref-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; margin-top: .5rem; }
@@ -217,10 +237,77 @@ function renderStyleInstructions(styleInstructions) {
           </div>
         </div>
         <div class="acc-body">
-          <div class="instruct-display">${text.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>
+          <textarea class="instruct-textarea" id="instruct-text-${style}">${text.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</textarea>
+          <div style="display:flex;align-items:center;margin-top:.4rem;">
+            <button class="save-btn" id="save-btn-${style}" onclick="saveInstruction('${style}')">Save &amp; Regenerate</button>
+            <span class="regen-status" id="regen-status-${style}"></span>
+          </div>
         </div>
       </div>`;
   }).join('');
+}
+
+async function saveInstruction(style) {
+  const textarea = document.getElementById('instruct-text-' + style);
+  const btn = document.getElementById('save-btn-' + style);
+  const statusEl = document.getElementById('regen-status-' + style);
+  const instruction = textarea.value.trim();
+
+  if (!instruction) {
+    statusEl.textContent = 'Instruction cannot be empty';
+    return;
+  }
+
+  // Disable all save buttons and the generate button during regeneration
+  document.querySelectorAll('.save-btn').forEach(b => b.disabled = true);
+  $('#gen-btn').disabled = true;
+  statusEl.innerHTML = '<span class="spinner"></span>Saving & regenerating...';
+
+  // Poll regen status while waiting
+  const pollId = setInterval(async () => {
+    try {
+      const r = await fetch('/api/regen_status');
+      const s = await r.json();
+      if (s.busy && s.message) {
+        statusEl.innerHTML = '<span class="spinner"></span>' + s.message;
+      }
+    } catch(e) {}
+  }, 1500);
+
+  try {
+    const r = await fetch('/api/update_instruction', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ style, instruction }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      statusEl.textContent = 'Error: ' + (data.error || r.statusText);
+      return;
+    }
+
+    // Update cached keys and refresh reference audio
+    cachedKeys = data.cached_keys || cachedKeys;
+    renderRefAccordion();
+    updateDesignSummary();
+
+    // Bust audio cache by adding timestamp to any playing audio elements
+    document.querySelectorAll('#ref-accordion audio').forEach(a => {
+      const src = a.getAttribute('src');
+      if (src && src.includes('style=' + style)) {
+        a.src = src.split('&_t=')[0] + '&_t=' + Date.now();
+      }
+    });
+
+    statusEl.innerHTML = '<span style="color:#16a34a;">Regenerated successfully</span>';
+    setTimeout(() => { statusEl.textContent = ''; }, 5000);
+  } catch(e) {
+    statusEl.textContent = 'Error: ' + e.message;
+  } finally {
+    clearInterval(pollId);
+    document.querySelectorAll('.save-btn').forEach(b => b.disabled = false);
+    $('#gen-btn').disabled = false;
+  }
 }
 
 function toggleRefLang(langId) {
