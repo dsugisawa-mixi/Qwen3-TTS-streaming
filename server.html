@@ -202,6 +202,26 @@
       <input type="checkbox" id="loop-check" onchange="$('#player').loop = this.checked"> ループ再生
     </label>
   </div>
+
+  <!-- ==================== Scenario Section ==================== -->
+  <h2>3. シナリオ再生</h2>
+  <p style="font-size:.9rem;margin-bottom:.5rem;">
+    シナリオ JSON ファイルを読み込んで、複数のセリフを一括合成・再生します。
+  </p>
+
+  <div style="display:flex;align-items:center;gap:.8rem;flex-wrap:wrap;">
+    <input type="file" id="scenario-file" accept=".json,application/json" onchange="loadScenarioFile(this)">
+    <button id="scenario-btn" onclick="doScenarioGenerate()" disabled>Scenario Generate</button>
+  </div>
+
+  <div id="scenario-preview" style="margin-top:.8rem;"></div>
+  <div class="status" id="scenario-status"></div>
+  <div style="display:flex;align-items:center;gap:.8rem;margin-top:.8rem;">
+    <audio id="scenario-player" controls class="hidden" style="flex:1;margin:0;"></audio>
+    <label id="scenario-loop-label" class="hidden" style="display:none;align-items:center;gap:.3rem;font-size:.85rem;white-space:nowrap;cursor:pointer;">
+      <input type="checkbox" id="scenario-loop-check" onchange="$('#scenario-player').loop = this.checked"> ループ再生
+    </label>
+  </div>
 </div>
 
 <div class="toast-container" id="toast-container"></div>
@@ -259,6 +279,7 @@ const STYLE_LABELS = {
   bright:  '明るく元気に',
   calm:    'ゆっくり穏やかに',
   angry:   '怒って（強い不満・抗議）',
+  quit:    '無音（間）',
 };
 
 const REF_TEXTS = {
@@ -952,6 +973,222 @@ async function doSmartGenerate() {
       $('#gen-status').textContent = 'Cancelled';
     } else {
       $('#gen-status').textContent = 'Error: ' + e.message;
+    }
+  } finally {
+    btn.disabled = false;
+    currentAbortController = null;
+  }
+}
+
+// =========================================================================
+// Scenario
+// =========================================================================
+let scenarioData = null;
+
+const SCENARIO_LANG_LABELS = {
+  japanese: '日本語', english: 'English', chinese: '中文',
+  ja: '日本語', en: 'English', ch: '中文',
+};
+
+function loadScenarioFile(input) {
+  const file = input.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (!Array.isArray(data) || data.length === 0) {
+        alert('シナリオは配列形式の JSON が必要です');
+        return;
+      }
+      scenarioData = data;
+      renderScenarioPreview();
+      $('#scenario-btn').disabled = false;
+      $('#scenario-status').textContent = `${data.length} エントリ読み込み完了`;
+    } catch (err) {
+      alert('JSON パースエラー: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+function renderScenarioPreview() {
+  const container = $('#scenario-preview');
+  if (!scenarioData || scenarioData.length === 0) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const rows = scenarioData.map((entry, i) => {
+    const langOut = SCENARIO_LANG_LABELS[entry.langOut?.toLowerCase()] || entry.langOut;
+    const styleLabel = STYLE_LABELS[entry.style] || entry.style;
+    let textPreview;
+    if (entry.style === 'quit') {
+      const spaceCount = (entry.text || '').split('').filter(c => c === ' ').length;
+      const ms = spaceCount * 30;
+      textPreview = `🔇 ${ms}ms (${(ms/1000).toFixed(2)}s)`;
+    } else {
+      textPreview = entry.text.replace(/\r?\n/g, ' ');
+    }
+    return `<tr id="scenario-row-${i}"${entry.style === 'quit' ? ' style="background:#f5f5f5;color:#999;"' : ''}>
+      <td style="padding:.3rem .5rem;font-size:.85rem;white-space:nowrap;">${i + 1}</td>
+      <td style="padding:.3rem .5rem;font-size:.85rem;">${entry.userId}</td>
+      <td style="padding:.3rem .5rem;font-size:.85rem;">${styleLabel}</td>
+      <td style="padding:.3rem .5rem;font-size:.85rem;">${langOut}</td>
+      <td style="padding:.3rem .5rem;font-size:.85rem;">${textPreview}</td>
+    </tr>`;
+  }).join('');
+
+  container.innerHTML = `
+    <table style="width:100%;border-collapse:collapse;border:1px solid #ddd;background:#fff;border-radius:6px;overflow:hidden;">
+      <thead>
+        <tr style="background:#f0f0f0;">
+          <th style="padding:.4rem .5rem;text-align:left;font-size:.85rem;">#</th>
+          <th style="padding:.4rem .5rem;text-align:left;font-size:.85rem;">User</th>
+          <th style="padding:.4rem .5rem;text-align:left;font-size:.85rem;">Style</th>
+          <th style="padding:.4rem .5rem;text-align:left;font-size:.85rem;">Lang</th>
+          <th style="padding:.4rem .5rem;text-align:left;font-size:.85rem;">Text</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+async function doScenarioGenerate() {
+  if (!scenarioData || scenarioData.length === 0) {
+    $('#scenario-status').textContent = 'シナリオを読み込んでください';
+    return;
+  }
+
+  const btn = $('#scenario-btn');
+  btn.disabled = true;
+  $('#scenario-status').textContent = 'Generating scenario...';
+  $('#scenario-player').classList.add('hidden');
+  $('#scenario-loop-label').style.display = 'none';
+
+  // Reset row highlights
+  scenarioData.forEach((_, i) => {
+    const row = $(`#scenario-row-${i}`);
+    if (row) row.style.background = '';
+  });
+
+  const t0 = performance.now();
+
+  try {
+    if (currentAbortController) {
+      currentAbortController.abort();
+      currentAbortController = null;
+    }
+    currentAbortController = new AbortController();
+
+    const resp = await fetch('/api/generate_scenario_stream', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({scenario: scenarioData}),
+      signal: currentAbortController.signal,
+    });
+
+    if (!resp.ok) {
+      const e = await resp.json().catch(() => ({error: resp.statusText}));
+      $('#scenario-status').textContent = 'Error: ' + (e.error || resp.statusText);
+      return;
+    }
+
+    // Stream playback (reuse same approach as single generate)
+    const sampleRate = parseInt(resp.headers.get('X-Sample-Rate') || '24000', 10);
+    const reader = resp.body.getReader();
+
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)({sampleRate});
+    let nextStartTime = 0;
+    let allInt16Samples = [];
+    let leftover = null;
+    let chunkCount = 0;
+    let tFirst = null;
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+
+      let bytes;
+      if (leftover) {
+        bytes = new Uint8Array(leftover.length + value.length);
+        bytes.set(leftover, 0);
+        bytes.set(value, leftover.length);
+        leftover = null;
+      } else {
+        bytes = value;
+      }
+
+      const usableLen = bytes.length & ~1;
+      if (bytes.length > usableLen) {
+        leftover = bytes.slice(usableLen);
+      }
+      if (usableLen === 0) continue;
+
+      const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, usableLen / 2);
+      allInt16Samples.push(Int16Array.from(int16));
+
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) {
+        float32[i] = int16[i] / 32768;
+      }
+
+      const audioBuffer = audioCtx.createBuffer(1, float32.length, sampleRate);
+      audioBuffer.getChannelData(0).set(float32);
+      const source = audioCtx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioCtx.destination);
+
+      const startTime = Math.max(audioCtx.currentTime, nextStartTime);
+      source.start(startTime);
+      nextStartTime = startTime + audioBuffer.duration;
+
+      chunkCount++;
+      if (tFirst === null) {
+        tFirst = performance.now();
+        const latency = ((tFirst - t0) / 1000).toFixed(2);
+        $('#scenario-status').textContent = `Latency: ${latency}s — Streaming scenario...`;
+      } else {
+        const latency = ((tFirst - t0) / 1000).toFixed(2);
+        $('#scenario-status').textContent = `Latency: ${latency}s — Streaming... ${chunkCount} chunks`;
+      }
+    }
+
+    // Build WAV for replay
+    const totalLen = allInt16Samples.reduce((s, a) => s + a.length, 0);
+    const merged = new Int16Array(totalLen);
+    let offset = 0;
+    for (const arr of allInt16Samples) {
+      merged.set(arr, offset);
+      offset += arr.length;
+    }
+
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+    const audioDuration = (totalLen / sampleRate).toFixed(1);
+
+    if (totalLen > 0) {
+      const wavBlob = createWavBlob(merged, sampleRate);
+      const url = URL.createObjectURL(wavBlob);
+      const player = $('#scenario-player');
+      player.src = url;
+      player.loop = $('#scenario-loop-check').checked;
+      player.classList.remove('hidden');
+      $('#scenario-loop-label').style.display = 'flex';
+    }
+
+    const latency = tFirst ? ((tFirst - t0) / 1000).toFixed(2) : '-';
+    $('#scenario-status').textContent = `Done in ${elapsed}s — Latency: ${latency}s (${audioDuration}s audio, ${chunkCount} chunks, ${scenarioData.length} entries)`;
+
+    const remainingTime = Math.max(0, nextStartTime - audioCtx.currentTime);
+    setTimeout(() => audioCtx.close().catch(() => {}), (remainingTime + 0.5) * 1000);
+    currentAbortController = null;
+
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      $('#scenario-status').textContent = 'Cancelled';
+    } else {
+      $('#scenario-status').textContent = 'Error: ' + e.message;
     }
   } finally {
     btn.disabled = false;

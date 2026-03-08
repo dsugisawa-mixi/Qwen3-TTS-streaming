@@ -1,0 +1,60 @@
+[
+    {
+        "userId": "dsugisawa",
+        "style" : "bright",
+        "langOut": "japanese",
+        "langIn": "japanese",
+        "text": "こんにちは！\r\nゆうしゃ けいすけ くん！"
+    },
+    {
+        "userId": "none",
+        "style" : "quit",
+        "langOut": "none",
+        "langIn": "none",
+        "text": "                                    "
+    },
+    {
+        "userId": "dsugisawa",
+        "style" : "neutral",
+        "langOut": "japanese",
+        "langIn": "japanese",
+        "text": "さて………、今日のトピックは………"
+    },
+    {
+        "userId": "none",
+        "style" : "quit",
+        "langOut": "none",
+        "langIn": "none",
+        "text": "    "
+    },
+    {
+        "userId": "dsugisawa",
+        "style" : "bright",
+        "langOut": "japanese",
+        "langIn": "japanese",
+        "text": "じゃーん！"
+    },
+    {
+        "userId": "none",
+        "style" : "quit",
+        "langOut": "none",
+        "langIn": "none",
+        "text": "                 "
+    },
+    {
+        "userId": "dsugisawa",
+        "style" : "calm",
+        "langOut": "japanese",
+        "langIn": "japanese",
+        "text": "天空のしろ………ダンジョン………、４５階………、"
+    },
+    {
+        "userId": "dsugisawa",
+        "style" : "bright",
+        "langOut": "japanese",
+        "langIn": "japanese",
+        "text": "バハムート攻略！"
+    }
+]
+
+

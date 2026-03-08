@@ -143,6 +143,12 @@ LANGS = ["ja", "en", "ch"]
 # language code -> model language value for generate
 LANG_TO_MODEL = {"ja": "Japanese", "en": "English", "ch": "Chinese"}
 
+# full language name (scenario JSON) -> language code
+LANG_NAME_TO_CODE = {
+    "japanese": "ja", "english": "en", "chinese": "ch",
+    "ja": "ja", "en": "en", "ch": "ch",
+}
+
 # language code -> full name for translation prompts
 TRANSLATE_LANG_MAP = {"ja": "Japanese", "en": "English", "ch": "Chinese"}
 
@@ -431,6 +437,8 @@ class TTSHandler(BaseHTTPRequestHandler):
                 self._handle_generate()
             elif path == "/api/generate_stream":
                 self._handle_generate_stream()
+            elif path == "/api/generate_scenario_stream":
+                self._handle_generate_scenario_stream()
             else:
                 self.send_error(404)
         except Exception as e:
@@ -682,6 +690,133 @@ class TTSHandler(BaseHTTPRequestHandler):
             summary = stats.summary()
             if summary:
                 print(summary)
+
+    def _handle_generate_scenario_stream(self):
+        body = self._read_json_body()
+        scenario = body.get("scenario", [])
+
+        if not scenario or not isinstance(scenario, list):
+            self._send_json({"error": "scenario array is required"}, 400)
+            return
+
+        print(f"[scenario] REQ  {len(scenario)} entries")
+
+        # Validate and resolve all entries first
+        resolved = []
+        for i, entry in enumerate(scenario):
+            user_id = entry.get("userId", "").strip()
+            style = entry.get("style", "").strip()
+            lang_out_raw = entry.get("langOut", "").strip().lower()
+            lang_in_raw = entry.get("langIn", "").strip().lower()
+            text = entry.get("text", "")  # preserve spaces for quit
+
+            # "quit" style = silence entry: count half-width spaces × 30ms
+            if style == "quit":
+                space_count = text.count(" ")
+                silence_ms = space_count * 30
+                silence_samples = int(24000 * silence_ms / 1000)
+                resolved.append({
+                    "index": i,
+                    "silence_samples": silence_samples,
+                    "silence_ms": silence_ms,
+                })
+                continue
+
+            text = text.strip()
+            lang_out = LANG_NAME_TO_CODE.get(lang_out_raw)
+            lang_in = LANG_NAME_TO_CODE.get(lang_in_raw)
+
+            if not user_id or not style or not lang_out or not lang_in or not text:
+                self._send_json(
+                    {"error": f"Entry {i}: invalid fields (userId={user_id}, style={style}, langOut={lang_out_raw}, langIn={lang_in_raw})"},
+                    400,
+                )
+                return
+            if style not in STYLES:
+                self._send_json({"error": f"Entry {i}: unknown style '{style}'"}, 400)
+                return
+
+            key = _cache_key(user_id, lang_out, style)
+            prompt_items = get_prompt(user_id, lang_out, style)
+            if prompt_items is None:
+                self._send_json(
+                    {"error": f"Entry {i}: prompt not found: {key}. Upload reference audio first."},
+                    404,
+                )
+                return
+
+            resolved.append({
+                "index": i,
+                "user_id": user_id,
+                "style": style,
+                "lang_out": lang_out,
+                "lang_in": lang_in,
+                "text": text,
+                "prompt_items": prompt_items,
+            })
+
+        # Send headers — stream PCM int16 data with JSON progress lines in X-Progress header
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("X-Sample-Rate", "24000")
+        self.send_header("X-Scenario-Count", str(len(resolved)))
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        t0 = time.time()
+        total_samples = 0
+
+        try:
+            for item in resolved:
+                idx = item["index"]
+
+                # Handle silence (quit) entries
+                if "silence_samples" in item:
+                    n_samples = item["silence_samples"]
+                    if n_samples > 0:
+                        silence_pcm = np.zeros(n_samples, dtype=np.int16)
+                        self.wfile.write(silence_pcm.tobytes())
+                        self.wfile.flush()
+                        total_samples += n_samples
+                    print(f"[scenario] #{idx} silence {item['silence_ms']}ms ({n_samples} samples)")
+                    continue
+
+                gen_text = item["text"]
+
+                # Translate if input language differs from output language
+                if item["lang_in"] != item["lang_out"] and TRANSLATOR_MODEL is not None:
+                    print(f"[scenario] #{idx} translating {item['lang_in']}->{item['lang_out']}")
+                    gen_text = translate_text(gen_text, item["lang_in"], item["lang_out"])
+                    print(f"[scenario] #{idx} translated: {gen_text!r}")
+
+                model_language = LANG_TO_MODEL[item["lang_out"]]
+                print(f"[scenario] #{idx} generating user={item['user_id']} style={item['style']} lang={model_language}")
+                print(f"[scenario] #{idx}  TEXT: {gen_text!r}")
+
+                for chunk, sr in TTS.stream_generate_voice_clone(
+                    text=gen_text,
+                    language=model_language,
+                    voice_clone_prompt=item["prompt_items"],
+                    emit_every_frames=8,
+                    decode_window_frames=80,
+                    overlap_samples=0,
+                ):
+                    pcm_int16 = np.clip(chunk, -1.0, 1.0)
+                    pcm_int16 = (pcm_int16 * 32767).astype(np.int16)
+                    self.wfile.write(pcm_int16.tobytes())
+                    self.wfile.flush()
+                    total_samples += len(chunk)
+
+                print(f"[scenario] #{idx} done")
+
+        except BrokenPipeError:
+            print(f"[scenario] Client disconnected")
+            return
+
+        elapsed = time.time() - t0
+        duration = total_samples / 24000
+        print(f"[scenario] ALL DONE {elapsed:.2f}s  audio={duration:.1f}s ({total_samples} samples)")
 
     def log_message(self, format, *args):
         print(f"[{self.log_date_time_string()}] {format % args}")
