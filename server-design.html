@@ -124,6 +124,10 @@
 
   <div class="gen-row">
     <div>
+      <label for="gen-gender">Gender</label>
+      <select id="gen-gender"></select>
+    </div>
+    <div>
       <label for="gen-style">Style</label>
       <select id="gen-style"></select>
     </div>
@@ -163,6 +167,7 @@
 const $ = s => document.querySelector(s);
 
 const LANG_LABELS = {en: 'English', ja: 'Japanese', ch: 'Chinese'};
+const GENDER_LABELS = {female: 'Female', male: 'Male'};
 const STYLE_LABELS = {
   neutral: 'Neutral',
   bright:  'Bright',
@@ -170,6 +175,7 @@ const STYLE_LABELS = {
   angry:   'Angry',
 };
 
+let serverGenders = [];
 let serverStyles = [];
 let serverLangs = [];
 let cachedKeys = [];
@@ -181,12 +187,18 @@ async function init() {
   const info = await r.json();
   $('#model-kind').textContent = info.model_kind;
 
+  serverGenders = info.genders || ['female', 'male'];
   serverStyles = info.styles || ['neutral', 'bright', 'calm', 'angry'];
   serverLangs = info.langs || ['ja', 'en', 'ch'];
   cachedKeys = info.cached_keys || [];
 
-  // Show per-style control instructions
+  // Show per-gender per-style control instructions
   renderStyleInstructions(info.style_instructions || {});
+
+  // Build gender dropdown
+  $('#gen-gender').innerHTML = serverGenders.map(g =>
+    `<option value="${g}">${GENDER_LABELS[g] || g}</option>`
+  ).join('');
 
   // Build style dropdown
   $('#gen-style').innerHTML = serverStyles.map(s =>
@@ -208,7 +220,7 @@ function toggleDesignSection() {
 }
 
 function updateDesignSummary() {
-  const total = serverStyles.length * serverLangs.length;
+  const total = serverGenders.length * serverStyles.length * serverLangs.length;
   const ready = cachedKeys.length;
   const el = $('#design-summary');
   if (ready === total) {
@@ -220,37 +232,54 @@ function updateDesignSummary() {
 
 function renderStyleInstructions(styleInstructions) {
   const container = $('#control-instruct');
-  const styles = Object.keys(styleInstructions);
-  if (styles.length === 0) {
+  const genders = Object.keys(styleInstructions);
+  if (genders.length === 0) {
     container.innerHTML = '<div class="instruct-display">(not set)</div>';
     return;
   }
-  container.innerHTML = styles.map(style => {
-    const label = STYLE_LABELS[style] || style;
-    const text = styleInstructions[style] || '';
+  container.innerHTML = genders.map(gender => {
+    const gLabel = GENDER_LABELS[gender] || gender;
+    const styles = Object.keys(styleInstructions[gender] || {});
+    const innerItems = styles.map(style => {
+      const sLabel = STYLE_LABELS[style] || style;
+      const text = styleInstructions[gender][style] || '';
+      const id = `instruct-${gender}-${style}`;
+      return `
+        <div class="acc-item" id="${id}">
+          <div class="acc-header" onclick="document.getElementById('${id}').classList.toggle('open')">
+            <div style="display:flex;align-items:center;gap:.6rem;">
+              <span class="acc-arrow">&#9654;</span>
+              <span class="acc-title">${sLabel}</span>
+            </div>
+          </div>
+          <div class="acc-body">
+            <textarea class="instruct-textarea" id="instruct-text-${gender}-${style}">${text.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</textarea>
+            <div style="display:flex;align-items:center;margin-top:.4rem;">
+              <button class="save-btn" id="save-btn-${gender}-${style}" onclick="saveInstruction('${gender}','${style}')">Save &amp; Regenerate</button>
+              <span class="regen-status" id="regen-status-${gender}-${style}"></span>
+            </div>
+          </div>
+        </div>`;
+    }).join('');
+
+    const gId = `instruct-gender-${gender}`;
     return `
-      <div class="acc-item" id="instruct-${style}">
-        <div class="acc-header" onclick="document.getElementById('instruct-${style}').classList.toggle('open')">
+      <div class="acc-item" id="${gId}">
+        <div class="acc-header" onclick="document.getElementById('${gId}').classList.toggle('open')">
           <div style="display:flex;align-items:center;gap:.6rem;">
             <span class="acc-arrow">&#9654;</span>
-            <span class="acc-title">${label}</span>
+            <span class="acc-title">${gLabel}</span>
           </div>
         </div>
-        <div class="acc-body">
-          <textarea class="instruct-textarea" id="instruct-text-${style}">${text.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</textarea>
-          <div style="display:flex;align-items:center;margin-top:.4rem;">
-            <button class="save-btn" id="save-btn-${style}" onclick="saveInstruction('${style}')">Save &amp; Regenerate</button>
-            <span class="regen-status" id="regen-status-${style}"></span>
-          </div>
-        </div>
+        <div class="acc-body">${innerItems}</div>
       </div>`;
   }).join('');
 }
 
-async function saveInstruction(style) {
-  const textarea = document.getElementById('instruct-text-' + style);
-  const btn = document.getElementById('save-btn-' + style);
-  const statusEl = document.getElementById('regen-status-' + style);
+async function saveInstruction(gender, style) {
+  const textarea = document.getElementById('instruct-text-' + gender + '-' + style);
+  const btn = document.getElementById('save-btn-' + gender + '-' + style);
+  const statusEl = document.getElementById('regen-status-' + gender + '-' + style);
   const instruction = textarea.value.trim();
 
   if (!instruction) {
@@ -278,7 +307,7 @@ async function saveInstruction(style) {
     const r = await fetch('/api/update_instruction', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ style, instruction }),
+      body: JSON.stringify({ gender, style, instruction }),
     });
     const data = await r.json();
     if (!r.ok) {
@@ -294,7 +323,7 @@ async function saveInstruction(style) {
     // Bust audio cache by adding timestamp to any playing audio elements
     document.querySelectorAll('#ref-accordion audio').forEach(a => {
       const src = a.getAttribute('src');
-      if (src && src.includes('style=' + style)) {
+      if (src && src.includes('gender=' + gender) && src.includes('style=' + style)) {
         a.src = src.split('&_t=')[0] + '&_t=' + Date.now();
       }
     });
@@ -310,46 +339,64 @@ async function saveInstruction(style) {
   }
 }
 
-function toggleRefLang(langId) {
-  const el = document.getElementById('ref-' + langId);
+function toggleRefGenderLang(id) {
+  const el = document.getElementById(id);
   if (el) el.classList.toggle('open');
 }
 
 function renderRefAccordion() {
   const container = $('#ref-accordion');
-  container.innerHTML = serverLangs.map(lang => {
-    const label = LANG_LABELS[lang] || lang;
+  container.innerHTML = serverGenders.map(gender => {
+    const gLabel = GENDER_LABELS[gender] || gender;
+    const genderKeys = cachedKeys.filter(k => k.startsWith(gender + '/'));
+    const gCountStr = `${genderKeys.length}/${serverStyles.length * serverLangs.length}`;
 
-    // Count available for this lang
-    const langKeys = cachedKeys.filter(k => k.startsWith(lang + '/'));
-    const countStr = `${langKeys.length}/${serverStyles.length}`;
+    const langItems = serverLangs.map(lang => {
+      const lLabel = LANG_LABELS[lang] || lang;
+      const langKeys = cachedKeys.filter(k => k.startsWith(gender + '/' + lang + '/'));
+      const countStr = `${langKeys.length}/${serverStyles.length}`;
 
-    const cards = serverStyles.map(style => {
-      const key = `${lang}/${style}`;
-      const available = cachedKeys.includes(key);
-      const styleLabel = STYLE_LABELS[style] || style;
-      if (!available) {
-        return `<div class="ref-card"><h4>${styleLabel}</h4><span class="not-available">Not available</span></div>`;
-      }
-      const designedSrc = `/api/reference_audio?lang=${lang}&style=${style}`;
-      return `<div class="ref-card">
-        <h4>${styleLabel}</h4>
-        <audio controls src="${designedSrc}"></audio>
-      </div>`;
+      const cards = serverStyles.map(style => {
+        const key = `${gender}/${lang}/${style}`;
+        const available = cachedKeys.includes(key);
+        const styleLabel = STYLE_LABELS[style] || style;
+        if (!available) {
+          return `<div class="ref-card"><h4>${styleLabel}</h4><span class="not-available">Not available</span></div>`;
+        }
+        const designedSrc = `/api/reference_audio?gender=${gender}&lang=${lang}&style=${style}`;
+        return `<div class="ref-card">
+          <h4>${styleLabel}</h4>
+          <audio controls src="${designedSrc}"></audio>
+        </div>`;
+      }).join('');
+
+      const langId = `ref-${gender}-${lang}`;
+      return `
+        <div class="acc-item" id="${langId}">
+          <div class="acc-header" onclick="toggleRefGenderLang('${langId}')">
+            <div style="display:flex;align-items:center;gap:.6rem;">
+              <span class="acc-arrow">&#9654;</span>
+              <span class="acc-title">${lLabel}</span>
+            </div>
+            <div class="acc-summary">${countStr}</div>
+          </div>
+          <div class="acc-body">
+            <div class="ref-grid">${cards}</div>
+          </div>
+        </div>`;
     }).join('');
 
+    const gId = `ref-gender-${gender}`;
     return `
-      <div class="acc-item" id="ref-${lang}">
-        <div class="acc-header" onclick="toggleRefLang('${lang}')">
+      <div class="acc-item" id="${gId}">
+        <div class="acc-header" onclick="toggleRefGenderLang('${gId}')">
           <div style="display:flex;align-items:center;gap:.6rem;">
             <span class="acc-arrow">&#9654;</span>
-            <span class="acc-title">${label}</span>
+            <span class="acc-title">${gLabel}</span>
           </div>
-          <div class="acc-summary">${countStr}</div>
+          <div class="acc-summary">${gCountStr}</div>
         </div>
-        <div class="acc-body">
-          <div class="ref-grid">${cards}</div>
-        </div>
+        <div class="acc-body">${langItems}</div>
       </div>`;
   }).join('');
 }
@@ -567,6 +614,7 @@ function releaseMicrophone() {
 // Generate (direct stream, no translation)
 // =========================================================================
 async function doSmartGenerate() {
+  const gender = $('#gen-gender').value;
   const style = $('#gen-style').value;
   const outLang = $('#gen-out-lang').value;
   const text = $('#gen-text').value.trim();
@@ -591,6 +639,7 @@ async function doSmartGenerate() {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
+        gender: gender,
         style: style,
         out_lang: outLang,
         text: text,

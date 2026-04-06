@@ -4,7 +4,7 @@ Voice Design streaming server for Qwen3-TTS.
 
 Flow:
   1. VoiceDesign model generates emotional reference audio from control instructions
-     for each (style x language) combination (4 styles x 3 langs = 12 refs)
+     for each (style x language) combination (4 styles x 2 langs = 8 refs)
   2. VoiceDesign model is unloaded (GPU memory freed)
   3. Base model loads and builds ICL clone prompts from designed audio
   4. Streaming TTS uses designed voice prompts
@@ -139,11 +139,12 @@ PERF_STREAM_FIRST = PerfStats("stream_first_chunk")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+GENDERS = ["female", "male"]
 STYLES = ["neutral", "bright", "calm", "angry"]
-LANGS = ["ja", "en", "ch"]
+LANGS = ["ja", "en"]
 
 # language code -> model language value
-LANG_TO_MODEL = {"ja": "Japanese", "en": "English", "ch": "Chinese"}
+LANG_TO_MODEL = {"ja": "Japanese", "en": "English"}
 
 # Texts spoken by VoiceDesign model when generating emotional reference audio.
 # Also used as ref_text for ICL-mode clone prompt (style reference).
@@ -204,57 +205,96 @@ DESIGN_REF_TEXTS = {
             "to fix this problem once and for all."
         ),
     },
-    "ch": {
-        "neutral": "请给我一杯水，谢谢。",
-        "bright": "请给我一杯水，谢谢。",
-        "calm": "请给我一杯水，谢谢。",
-        "angry": "请给我一杯水，谢谢。",
-    },
 }
 
 
-# Base character traits shared across all styles
-_BASE_INSTRUCTION = """\
+# Base character traits shared across all styles, per gender
+_BASE_INSTRUCTIONS = {
+    "female": """\
 gender: Female.
-age: Young adult to middle-aged adult.
-clarity: Highly articulate and distinct pronunciation.
-fluency: Very fluent speech with no hesitations.
+age: Early teens girl, around 12-13 years old, pre-junior-high-school.
+clarity: Clear but with a youthful, slightly naive enunciation.
+fluency: Fluent speech with occasional childlike enthusiasm.
 accent: British English.
-texture: Bright and clear vocal texture."""
+texture: High-pitched, light, and innocent vocal texture with a girlish quality.""",
+    "male": """\
+gender: Male.
+age: Early teens boy, around 12-13 years old, almost junior-high-school age but still sees himself as a little kid.
+clarity: Clear but with a boyish, slightly immature enunciation.
+fluency: Fluent speech with occasional childlike excitement and innocence.
+accent: British English.
+texture: High-pitched, soft, and boyish vocal texture, not yet deepened by puberty.""",
+}
 
 # Per-style overrides for emotion, tone, speed, volume, pitch, personality
+# Nested: {gender: {style: instruction}}
 STYLE_INSTRUCTIONS = {
-    "neutral": _BASE_INSTRUCTION + """
-pitch: Medium female pitch, steady and measured.
+    "female": {
+        "neutral": _BASE_INSTRUCTIONS["female"] + """
+pitch: High girlish pitch, steady and measured.
 speed: Moderate pace, clear and professional.
 volume: Moderate and consistent.
 emotion: Calm and composed, matter-of-fact delivery.
 tone: Authoritative, professional, and informative.
 personality: Steady, reliable, and trustworthy.""",
 
-    "bright": _BASE_INSTRUCTION + """
-pitch: Medium female pitch with significant upward inflections for emphasis and excitement.
+        "bright": _BASE_INSTRUCTIONS["female"] + """
+pitch: High girlish pitch with significant upward inflections for emphasis and excitement.
 speed: Fast-paced delivery with deliberate pauses for dramatic effect.
 volume: Loud and projecting, increasing notably during moments of praise and announcements.
 emotion: Enthusiastic and excited, especially when complimenting.
 tone: Upbeat, authoritative, and performative.
 personality: Confident, extroverted, and engaging.""",
 
-    "calm": _BASE_INSTRUCTION + """
-pitch: Medium female pitch, gentle and soothing with minimal inflection.
+        "calm": _BASE_INSTRUCTIONS["female"] + """
+pitch: High girlish pitch, gentle and soothing with minimal inflection.
 speed: Slow and relaxed pace, unhurried delivery.
 volume: Soft and quiet, intimate and warm.
 emotion: Peaceful and serene, reassuring.
 tone: Gentle, warm, and meditative.
 personality: Patient, nurturing, and contemplative.""",
 
-    "angry": _BASE_INSTRUCTION + """
-pitch: Medium female pitch with sharp, forceful downward inflections.
+        "angry": _BASE_INSTRUCTIONS["female"] + """
+pitch: High girlish pitch with sharp, forceful downward inflections.
 speed: Intense and clipped, with aggressive emphasis on key words.
 volume: Very loud and forceful, almost shouting at peak moments.
 emotion: Angry and frustrated, seething with indignation.
 tone: Confrontational, demanding, and fierce.
 personality: Assertive, combative, and unyielding.""",
+    },
+    "male": {
+        "neutral": _BASE_INSTRUCTIONS["male"] + """
+pitch: High boyish pitch, steady and measured.
+speed: Moderate pace, clear and professional.
+volume: Moderate and consistent.
+emotion: Calm and composed, matter-of-fact delivery.
+tone: Authoritative, professional, and informative.
+personality: Steady, reliable, and trustworthy.""",
+
+        "bright": _BASE_INSTRUCTIONS["male"] + """
+pitch: High boyish pitch with upward inflections for emphasis and excitement.
+speed: Fast-paced delivery with deliberate pauses for dramatic effect.
+volume: Loud and projecting, increasing notably during moments of praise and announcements.
+emotion: Enthusiastic and excited, especially when complimenting.
+tone: Upbeat, authoritative, and performative.
+personality: Confident, extroverted, and engaging.""",
+
+        "calm": _BASE_INSTRUCTIONS["male"] + """
+pitch: High boyish pitch, gentle and soothing with minimal inflection.
+speed: Slow and relaxed pace, unhurried delivery.
+volume: Soft and quiet, intimate and warm.
+emotion: Peaceful and serene, reassuring.
+tone: Gentle, warm, and meditative.
+personality: Patient, nurturing, and contemplative.""",
+
+        "angry": _BASE_INSTRUCTIONS["male"] + """
+pitch: High boyish pitch with sharp, forceful downward inflections.
+speed: Intense and clipped, with aggressive emphasis on key words.
+volume: Very loud and forceful, almost shouting at peak moments.
+emotion: Angry and frustrated, seething with indignation.
+tone: Confrontational, demanding, and fierce.
+personality: Assertive, combative, and unyielding.""",
+    },
 }
 
 DESIGNED_DIR = Path("./designed_references")
@@ -289,13 +329,13 @@ REGEN_STATUS: dict = {"busy": False, "message": ""}
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _prompt_key(lang: str, style: str) -> str:
-    return f"{lang}/{style}"
+def _prompt_key(gender: str, lang: str, style: str) -> str:
+    return f"{gender}/{lang}/{style}"
 
 
-def _designed_wav_path(lang: str, style: str) -> Path:
+def _designed_wav_path(gender: str, lang: str, style: str) -> Path:
     """Path to VoiceDesign-generated emotional reference audio."""
-    return DESIGNED_DIR / lang / f"{style}.wav"
+    return DESIGNED_DIR / gender / lang / f"{style}.wav"
 
 
 # ---------------------------------------------------------------------------
@@ -303,16 +343,20 @@ def _designed_wav_path(lang: str, style: str) -> Path:
 # ---------------------------------------------------------------------------
 
 def _instructions_fingerprint(style_instructions: dict) -> str:
-    """Build a deterministic string from all style instructions for change detection."""
+    """Build a deterministic string from all style instructions for change detection.
+
+    style_instructions is {gender: {style: instruction}}.
+    """
     parts = []
-    for style in sorted(style_instructions.keys()):
-        parts.append(f"[{style}]\n{style_instructions[style].strip()}")
+    for gender in sorted(style_instructions.keys()):
+        for style in sorted(style_instructions[gender].keys()):
+            parts.append(f"[{gender}/{style}]\n{style_instructions[gender][style].strip()}")
     return "\n\n".join(parts)
 
 
 def design_voice(design_model_path: str, device: str, dtype, attn,
                  style_instructions: dict, force: bool = False):
-    """Load VoiceDesign model, generate reference audio per (style x lang), save, unload."""
+    """Load VoiceDesign model, generate reference audio per (gender x style x lang), save, unload."""
     DESIGNED_DIR.mkdir(parents=True, exist_ok=True)
 
     instruct_file = DESIGNED_DIR / "instruct.txt"
@@ -320,8 +364,8 @@ def design_voice(design_model_path: str, device: str, dtype, attn,
 
     # Check if we can skip the design step
     all_exist = all(
-        _designed_wav_path(lang, style).exists()
-        for lang in LANGS for style in STYLES
+        _designed_wav_path(gender, lang, style).exists()
+        for gender in GENDERS for lang in LANGS for style in STYLES
     )
     instruct_match = (
         instruct_file.exists()
@@ -329,7 +373,7 @@ def design_voice(design_model_path: str, device: str, dtype, attn,
     )
 
     if all_exist and instruct_match and not force:
-        total = len(LANGS) * len(STYLES)
+        total = len(GENDERS) * len(LANGS) * len(STYLES)
         print(f"[design] All {total} designed references found (instructions unchanged). Skipping VoiceDesign.")
         return
 
@@ -342,33 +386,34 @@ def design_voice(design_model_path: str, device: str, dtype, attn,
     )
 
     generated = 0
-    total = len(LANGS) * len(STYLES)
-    for lang in LANGS:
-        lang_dir = DESIGNED_DIR / lang
-        lang_dir.mkdir(parents=True, exist_ok=True)
-        for style in STYLES:
-            wav_path = _designed_wav_path(lang, style)
-            # Skip existing if instructions unchanged and not forced
-            if wav_path.exists() and instruct_match and not force:
-                generated += 1
-                print(f"[design] [{generated}/{total}] {lang}/{style} — exists, skip")
-                continue
+    total = len(GENDERS) * len(LANGS) * len(STYLES)
+    for gender in GENDERS:
+        for lang in LANGS:
+            out_dir = DESIGNED_DIR / gender / lang
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for style in STYLES:
+                wav_path = _designed_wav_path(gender, lang, style)
+                # Skip existing if instructions unchanged and not forced
+                if wav_path.exists() and instruct_match and not force:
+                    generated += 1
+                    print(f"[design] [{generated}/{total}] {gender}/{lang}/{style} — exists, skip")
+                    continue
 
-            ref_text = DESIGN_REF_TEXTS[lang][style]
-            model_lang = LANG_TO_MODEL[lang]
-            instruct = style_instructions[style]
-            generated += 1
-            print(f"[design] [{generated}/{total}] Generating {lang}/{style} ({model_lang}) ...")
-            t0 = time.time()
-            wavs, sr = tts_design.generate_voice_design(
-                text=ref_text,
-                instruct=instruct,
-                language=model_lang,
-            )
-            elapsed = time.time() - t0
-            sf.write(str(wav_path), wavs[0], sr)
-            duration = len(wavs[0]) / sr
-            print(f"[design]   Saved {wav_path} ({elapsed:.2f}s, {duration:.1f}s audio, {sr}Hz)")
+                ref_text = DESIGN_REF_TEXTS[lang][style]
+                model_lang = LANG_TO_MODEL[lang]
+                instruct = style_instructions[gender][style]
+                generated += 1
+                print(f"[design] [{generated}/{total}] Generating {gender}/{lang}/{style} ({model_lang}) ...")
+                t0 = time.time()
+                wavs, sr = tts_design.generate_voice_design(
+                    text=ref_text,
+                    instruct=instruct,
+                    language=model_lang,
+                )
+                elapsed = time.time() - t0
+                sf.write(str(wav_path), wavs[0], sr)
+                duration = len(wavs[0]) / sr
+                print(f"[design]   Saved {wav_path} ({elapsed:.2f}s, {duration:.1f}s audio, {sr}Hz)")
 
     # Save fingerprint for change detection on next restart
     instruct_file.write_text(fingerprint, encoding="utf-8")
@@ -383,44 +428,45 @@ def design_voice(design_model_path: str, device: str, dtype, attn,
 def build_clone_prompts():
     """Build ICL clone prompts from designed reference audio only (no speaker embedding)."""
     built = 0
-    total = len(LANGS) * len(STYLES)
-    for lang in LANGS:
-        for style in STYLES:
-            designed_wav = _designed_wav_path(lang, style)
-            key = _prompt_key(lang, style)
+    total = len(GENDERS) * len(LANGS) * len(STYLES)
+    for gender in GENDERS:
+        for lang in LANGS:
+            for style in STYLES:
+                designed_wav = _designed_wav_path(gender, lang, style)
+                key = _prompt_key(gender, lang, style)
 
-            if not designed_wav.exists():
-                print(f"[prompt] WARNING: designed ref {designed_wav} not found, skipping {key}")
-                continue
+                if not designed_wav.exists():
+                    print(f"[prompt] WARNING: designed ref {designed_wav} not found, skipping {key}")
+                    continue
 
-            design_ref_text = DESIGN_REF_TEXTS[lang][style]
+                design_ref_text = DESIGN_REF_TEXTS[lang][style]
 
-            print(f"[prompt] Building ICL prompt for {key} ...")
-            t0 = time.time()
+                print(f"[prompt] Building ICL prompt for {key} ...")
+                t0 = time.time()
 
-            prompt_items = TTS.create_voice_clone_prompt(
-                ref_audio=str(designed_wav),
-                ref_text=design_ref_text,
-                x_vector_only_mode=False,
-            )
-            CLONE_PROMPTS[key] = prompt_items
+                prompt_items = TTS.create_voice_clone_prompt(
+                    ref_audio=str(designed_wav),
+                    ref_text=design_ref_text,
+                    x_vector_only_mode=False,
+                )
+                CLONE_PROMPTS[key] = prompt_items
 
-            elapsed = time.time() - t0
-            built += 1
-            print(f"[prompt] {key} OK ({elapsed:.2f}s)  [{built}/{total}]")
+                elapsed = time.time() - t0
+                built += 1
+                print(f"[prompt] {key} OK ({elapsed:.2f}s)  [{built}/{total}]")
 
 
 # ---------------------------------------------------------------------------
 # Runtime regeneration (called when style instructions are edited via UI)
 # ---------------------------------------------------------------------------
 
-def regenerate_style(style: str):
-    """Regenerate designed voice reference for one style across all languages.
+def regenerate_style(gender: str, style: str):
+    """Regenerate designed voice reference for one gender+style across all languages.
 
     This is a heavy operation:
       1. Unload Base model
       2. Load VoiceDesign model
-      3. Regenerate audio for the given style (all langs)
+      3. Regenerate audio for the given gender+style (all langs)
       4. Unload VoiceDesign model
       5. Reload Base model
       6. Rebuild ALL ICL prompts (Base model was reloaded)
@@ -434,7 +480,7 @@ def regenerate_style(style: str):
     try:
         # 1. Unload Base model
         REGEN_STATUS["message"] = "Unloading Base model..."
-        print(f"[regen] Unloading Base model for style={style} regeneration...")
+        print(f"[regen] Unloading Base model for {gender}/{style} regeneration...")
         del TTS
         TTS = None
         if torch.cuda.is_available():
@@ -450,18 +496,18 @@ def regenerate_style(style: str):
             attn_implementation=ATTN,
         )
 
-        # 3. Regenerate audio for this style across all languages
+        # 3. Regenerate audio for this gender+style across all languages
         total = len(LANGS)
         for i, lang in enumerate(LANGS):
-            lang_dir = DESIGNED_DIR / lang
-            lang_dir.mkdir(parents=True, exist_ok=True)
-            wav_path = _designed_wav_path(lang, style)
+            out_dir = DESIGNED_DIR / gender / lang
+            out_dir.mkdir(parents=True, exist_ok=True)
+            wav_path = _designed_wav_path(gender, lang, style)
             ref_text = DESIGN_REF_TEXTS[lang][style]
             model_lang = LANG_TO_MODEL[lang]
-            instruct = ACTIVE_STYLE_INSTRUCTIONS[style]
+            instruct = ACTIVE_STYLE_INSTRUCTIONS[gender][style]
 
-            REGEN_STATUS["message"] = f"Generating {lang}/{style} ({i+1}/{total})..."
-            print(f"[regen] [{i+1}/{total}] Generating {lang}/{style} ({model_lang}) ...")
+            REGEN_STATUS["message"] = f"Generating {gender}/{lang}/{style} ({i+1}/{total})..."
+            print(f"[regen] [{i+1}/{total}] Generating {gender}/{lang}/{style} ({model_lang}) ...")
             t0 = time.time()
             wavs, sr = tts_design.generate_voice_design(
                 text=ref_text,
@@ -589,21 +635,26 @@ class TTSHandler(BaseHTTPRequestHandler):
         self._send_json({
             "model_kind": MODEL_KIND,
             "style_instructions": ACTIVE_STYLE_INSTRUCTIONS,
+            "genders": GENDERS,
             "styles": STYLES,
             "langs": LANGS,
             "cached_keys": sorted(CLONE_PROMPTS.keys()),
         })
 
     def _handle_reference_audio(self, qs):
+        gender = (qs.get("gender", ["female"])[0]).strip()
         lang = (qs.get("lang", [""])[0]).strip()
         style = (qs.get("style", [""])[0]).strip()
+        if gender not in GENDERS:
+            self.send_error(400, "Invalid gender")
+            return
         if lang not in LANGS:
             self.send_error(400, "Invalid lang")
             return
         if style not in STYLES:
             self.send_error(400, "Invalid style")
             return
-        wav_path = _designed_wav_path(lang, style)
+        wav_path = _designed_wav_path(gender, lang, style)
         if not wav_path.exists():
             self.send_error(404, "Reference audio not found")
             return
@@ -623,9 +674,13 @@ class TTSHandler(BaseHTTPRequestHandler):
 
     def _handle_update_instruction(self):
         body = self._read_json_body()
+        gender = body.get("gender", "female").strip()
         style = body.get("style", "").strip()
         instruction = body.get("instruction", "").strip()
 
+        if gender not in GENDERS:
+            self._send_json({"error": f"Invalid gender: {gender}"}, 400)
+            return
         if style not in STYLES:
             self._send_json({"error": f"Invalid style: {style}"}, 400)
             return
@@ -643,11 +698,11 @@ class TTSHandler(BaseHTTPRequestHandler):
 
         try:
             # Update the active instruction
-            ACTIVE_STYLE_INSTRUCTIONS[style] = instruction
-            print(f"[update] Style '{style}' instruction updated ({len(instruction)} chars)")
+            ACTIVE_STYLE_INSTRUCTIONS[gender][style] = instruction
+            print(f"[update] {gender}/{style} instruction updated ({len(instruction)} chars)")
 
             # Regenerate in the request thread (blocking — client polls /api/regen_status)
-            regenerate_style(style)
+            regenerate_style(gender, style)
 
             self._send_json({
                 "status": "ok",
@@ -661,13 +716,17 @@ class TTSHandler(BaseHTTPRequestHandler):
 
     def _handle_generate(self):
         body = self._read_json_body()
+        gender = body.get("gender", "female")
         style = body.get("style", "neutral")
         out_lang = body.get("out_lang", "en")
         text = body["text"]
 
-        print(f"[generate] REQ  style={style} out={out_lang}")
+        print(f"[generate] REQ  gender={gender} style={style} out={out_lang}")
         print(f"[generate]  TEXT: {text!r}")
 
+        if gender not in GENDERS:
+            self._send_json({"error": f"Invalid gender: {gender}"}, 400)
+            return
         if style not in STYLES:
             self._send_json({"error": f"Invalid style: {style}"}, 400)
             return
@@ -675,7 +734,7 @@ class TTSHandler(BaseHTTPRequestHandler):
             self._send_json({"error": f"Invalid out_lang: {out_lang}"}, 400)
             return
 
-        key = _prompt_key(out_lang, style)
+        key = _prompt_key(gender, out_lang, style)
         prompt_items = CLONE_PROMPTS.get(key)
         if prompt_items is None:
             self._send_json(
@@ -705,13 +764,17 @@ class TTSHandler(BaseHTTPRequestHandler):
 
     def _handle_generate_stream(self):
         body = self._read_json_body()
+        gender = body.get("gender", "female")
         style = body.get("style", "neutral")
         out_lang = body.get("out_lang", "en")
         text = body["text"]
 
-        print(f"[stream]   REQ  style={style} out={out_lang}")
+        print(f"[stream]   REQ  gender={gender} style={style} out={out_lang}")
         print(f"[stream]    TEXT: {text!r}")
 
+        if gender not in GENDERS:
+            self._send_json({"error": f"Invalid gender: {gender}"}, 400)
+            return
         if style not in STYLES:
             self._send_json({"error": f"Invalid style: {style}"}, 400)
             return
@@ -719,7 +782,7 @@ class TTSHandler(BaseHTTPRequestHandler):
             self._send_json({"error": f"Invalid out_lang: {out_lang}"}, 400)
             return
 
-        key = _prompt_key(out_lang, style)
+        key = _prompt_key(gender, out_lang, style)
         prompt_items = CLONE_PROMPTS.get(key)
         if prompt_items is None:
             self._send_json(
@@ -813,7 +876,7 @@ def main():
                         help="Force regeneration of designed reference audio")
     args = parser.parse_args()
 
-    ACTIVE_STYLE_INSTRUCTIONS = dict(STYLE_INSTRUCTIONS)  # mutable copy
+    ACTIVE_STYLE_INSTRUCTIONS = {g: dict(s) for g, s in STYLE_INSTRUCTIONS.items()}  # mutable copy
 
     dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
     attn = None if args.no_flash_attn else "flash_attention_2"
@@ -826,11 +889,12 @@ def main():
     if args.design_model and args.design_model.lower() != "none":
         DESIGN_MODEL_PATH = args.design_model
 
-    print(f"[config] {len(ACTIVE_STYLE_INSTRUCTIONS)} style instructions:")
-    for style, instruct in ACTIVE_STYLE_INSTRUCTIONS.items():
-        line_count = len(instruct.strip().splitlines())
-        print(f"  [{style}] {line_count} lines")
-    print(f"[config] {len(STYLES)} styles x {len(LANGS)} langs = {len(STYLES)*len(LANGS)} combinations")
+    print(f"[config] {len(GENDERS)} genders x {len(STYLES)} styles instructions:")
+    for gender in GENDERS:
+        for style, instruct in ACTIVE_STYLE_INSTRUCTIONS[gender].items():
+            line_count = len(instruct.strip().splitlines())
+            print(f"  [{gender}/{style}] {line_count} lines")
+    print(f"[config] {len(GENDERS)} genders x {len(STYLES)} styles x {len(LANGS)} langs = {len(GENDERS)*len(STYLES)*len(LANGS)} combinations")
 
     # Step 1: Design emotional voice references (VoiceDesign model)
     if args.design_model and args.design_model.lower() != "none":
@@ -843,9 +907,9 @@ def main():
 
     # Verify designed references exist
     designed_missing = [
-        f"{lang}/{style}"
-        for lang in LANGS for style in STYLES
-        if not _designed_wav_path(lang, style).exists()
+        f"{gender}/{lang}/{style}"
+        for gender in GENDERS for lang in LANGS for style in STYLES
+        if not _designed_wav_path(gender, lang, style).exists()
     ]
     if designed_missing:
         print(f"[design] WARNING: Missing designed refs: {designed_missing}")
