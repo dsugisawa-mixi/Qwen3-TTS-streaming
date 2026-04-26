@@ -298,6 +298,7 @@ personality: Assertive, combative, and unyielding.""",
 }
 
 DESIGNED_DIR = Path("./designed_references")
+PRON_DICT_PATH = Path("./pron_dict.json")
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +325,11 @@ CLONE_PROMPTS: dict = {}
 REGEN_LOCK = threading.Lock()
 REGEN_STATUS: dict = {"busy": False, "message": ""}
 
+# Japanese pronunciation dictionary: list of (kanji, reading) sorted by len(kanji) desc
+# so longer phrases match before shorter substrings.
+PRON_DICT: list[tuple[str, str]] = []
+PRON_DICT_LOCK = threading.Lock()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -336,6 +342,62 @@ def _prompt_key(gender: str, lang: str, style: str) -> str:
 def _designed_wav_path(gender: str, lang: str, style: str) -> Path:
     """Path to VoiceDesign-generated emotional reference audio."""
     return DESIGNED_DIR / gender / lang / f"{style}.wav"
+
+
+def _read_pron_dict_file() -> dict:
+    """Read raw dict from PRON_DICT_PATH, creating with a sample if missing."""
+    if not PRON_DICT_PATH.exists():
+        sample = {"鍛冶場": "かじば"}
+        PRON_DICT_PATH.write_text(
+            json.dumps(sample, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print(f"[dict] Created sample {PRON_DICT_PATH}")
+    raw = json.loads(PRON_DICT_PATH.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"{PRON_DICT_PATH} must be a JSON object {{kanji: reading}}")
+    return raw
+
+
+def _rebuild_pron_dict_from_raw(raw: dict) -> int:
+    """Update in-memory PRON_DICT (sorted by key length desc) from a raw dict."""
+    global PRON_DICT
+    PRON_DICT = sorted(
+        ((str(k), str(v)) for k, v in raw.items() if k and v),
+        key=lambda kv: -len(kv[0]),
+    )
+    return len(PRON_DICT)
+
+
+def _save_pron_dict_file(raw: dict) -> None:
+    """Persist raw dict to disk (pretty-printed, UTF-8)."""
+    PRON_DICT_PATH.write_text(
+        json.dumps(raw, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def load_pron_dict() -> int:
+    """Load Japanese pronunciation dict from PRON_DICT_PATH. Returns entry count."""
+    raw = _read_pron_dict_file()
+    n = _rebuild_pron_dict_from_raw(raw)
+    print(f"[dict] Loaded {n} pronunciation entries from {PRON_DICT_PATH}")
+    return n
+
+
+def get_pron_dict_raw() -> dict:
+    """Return current in-memory dict as {kanji: reading}."""
+    return {k: v for k, v in PRON_DICT}
+
+
+def apply_pron_dict(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Apply pronunciation dict to text. Returns (new_text, applied_substitutions)."""
+    applied: list[tuple[str, str]] = []
+    for kanji, reading in PRON_DICT:
+        if kanji in text:
+            text = text.replace(kanji, reading)
+            applied.append((kanji, reading))
+    return text, applied
 
 
 # ---------------------------------------------------------------------------
@@ -612,6 +674,8 @@ class TTSHandler(BaseHTTPRequestHandler):
             self._handle_stats()
         elif path == "/api/regen_status":
             self._send_json(REGEN_STATUS)
+        elif path == "/api/pron_dict":
+            self._handle_pron_dict_list()
         else:
             self.send_error(404)
 
@@ -624,6 +688,21 @@ class TTSHandler(BaseHTTPRequestHandler):
                 self._handle_generate_stream()
             elif path == "/api/update_instruction":
                 self._handle_update_instruction()
+            elif path == "/api/pron_dict":
+                self._handle_pron_dict_upsert()
+            elif path == "/api/pron_dict/reload":
+                self._handle_pron_dict_reload()
+            else:
+                self.send_error(404)
+        except Exception as e:
+            self._send_json({"error": f"{type(e).__name__}: {e}"}, 500)
+
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        try:
+            if path == "/api/pron_dict":
+                self._handle_pron_dict_delete(parse_qs(parsed.query))
             else:
                 self.send_error(404)
         except Exception as e:
@@ -714,6 +793,84 @@ class TTSHandler(BaseHTTPRequestHandler):
         finally:
             REGEN_LOCK.release()
 
+    def _handle_pron_dict_list(self):
+        with PRON_DICT_LOCK:
+            entries = get_pron_dict_raw()
+        self._send_json({
+            "entries": entries,
+            "count": len(entries),
+            "path": str(PRON_DICT_PATH),
+        })
+
+    def _handle_pron_dict_upsert(self):
+        body = self._read_json_body()
+        kanji = (body.get("kanji") or "").strip()
+        reading = (body.get("reading") or "").strip()
+        if not kanji:
+            self._send_json({"error": "Field 'kanji' is required"}, 400)
+            return
+        if not reading:
+            self._send_json({"error": "Field 'reading' is required"}, 400)
+            return
+
+        with PRON_DICT_LOCK:
+            raw = _read_pron_dict_file()
+            existed = kanji in raw
+            raw[kanji] = reading
+            _save_pron_dict_file(raw)
+            _rebuild_pron_dict_from_raw(raw)
+            count = len(raw)
+
+        action = "updated" if existed else "created"
+        print(f"[dict] {action}: {kanji!r} -> {reading!r}  (total={count})")
+        self._send_json({
+            "status": "ok",
+            "action": action,
+            "kanji": kanji,
+            "reading": reading,
+            "count": count,
+        }, status=200 if existed else 201)
+
+    def _handle_pron_dict_delete(self, qs: dict):
+        # Accept kanji from query string OR JSON body
+        kanji = (qs.get("kanji", [""])[0]).strip()
+        if not kanji and int(self.headers.get("Content-Length", 0)) > 0:
+            body = self._read_json_body()
+            kanji = (body.get("kanji") or "").strip()
+        if not kanji:
+            self._send_json({"error": "Field 'kanji' is required"}, 400)
+            return
+
+        with PRON_DICT_LOCK:
+            raw = _read_pron_dict_file()
+            if kanji not in raw:
+                self._send_json({"error": f"Not found: {kanji}"}, 404)
+                return
+            removed_reading = raw.pop(kanji)
+            _save_pron_dict_file(raw)
+            _rebuild_pron_dict_from_raw(raw)
+            count = len(raw)
+
+        print(f"[dict] deleted: {kanji!r} (was {removed_reading!r})  (total={count})")
+        self._send_json({
+            "status": "ok",
+            "action": "deleted",
+            "kanji": kanji,
+            "reading": removed_reading,
+            "count": count,
+        })
+
+    def _handle_pron_dict_reload(self):
+        with PRON_DICT_LOCK:
+            n = load_pron_dict()
+            entries = get_pron_dict_raw()
+        self._send_json({
+            "status": "ok",
+            "action": "reloaded",
+            "count": n,
+            "entries": entries,
+        })
+
     def _handle_generate(self):
         body = self._read_json_body()
         gender = body.get("gender", "female")
@@ -733,6 +890,12 @@ class TTSHandler(BaseHTTPRequestHandler):
         if out_lang not in LANGS:
             self._send_json({"error": f"Invalid out_lang: {out_lang}"}, 400)
             return
+
+        if out_lang == "ja" and PRON_DICT:
+            text, applied = apply_pron_dict(text)
+            if applied:
+                print(f"[generate]  DICT applied: {applied}")
+                print(f"[generate]  TEXT(post): {text!r}")
 
         key = _prompt_key(gender, out_lang, style)
         prompt_items = CLONE_PROMPTS.get(key)
@@ -781,6 +944,12 @@ class TTSHandler(BaseHTTPRequestHandler):
         if out_lang not in LANGS:
             self._send_json({"error": f"Invalid out_lang: {out_lang}"}, 400)
             return
+
+        if out_lang == "ja" and PRON_DICT:
+            text, applied = apply_pron_dict(text)
+            if applied:
+                print(f"[stream]    DICT applied: {applied}")
+                print(f"[stream]    TEXT(post): {text!r}")
 
         key = _prompt_key(gender, out_lang, style)
         prompt_items = CLONE_PROMPTS.get(key)
@@ -877,6 +1046,12 @@ def main():
     args = parser.parse_args()
 
     ACTIVE_STYLE_INSTRUCTIONS = {g: dict(s) for g, s in STYLE_INSTRUCTIONS.items()}  # mutable copy
+
+    # Load Japanese pronunciation dictionary
+    try:
+        load_pron_dict()
+    except Exception as e:
+        print(f"[dict] WARNING: failed to load {PRON_DICT_PATH}: {e}")
 
     dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
     attn = None if args.no_flash_attn else "flash_attention_2"
