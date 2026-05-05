@@ -47,7 +47,10 @@ COPY pyproject.toml MANIFEST.in README.md ./
 COPY qwen_tts/ ./qwen_tts/
 RUN source /opt/conda/etc/profile.d/conda.sh && conda activate qwen3-tts \
     && python -m pip install --no-cache-dir . \
-    && python -m pip install --no-cache-dir opuslib==3.0.1
+    && python -m pip install --no-cache-dir opuslib==3.0.1 \
+    && python -m pip install --no-cache-dir --force-reinstall --no-deps \
+        torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 \
+        --index-url https://download.pytorch.org/whl/cu130
 
 # --- Server files ---
 COPY server-design.py server-design.html ./
