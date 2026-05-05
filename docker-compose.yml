@@ -41,6 +41,11 @@ services:
               count: 1
               capabilities: [gpu]
     shm_size: "2gb"
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
 
   gpt-oss-llm:
     image: 950363886025.dkr.ecr.ap-northeast-1.amazonaws.com/gpt-oss-llm:latest
@@ -60,6 +65,14 @@ services:
       - LAB_ID=lab-A
       - LAB_NAME=ネットワークチーム
       - LAB_SUMMARY=IPSJ/OS/DPS の最新 + 研究報告論文を中心
+      # TTS は Compose 内部ネットワーク経由で qwen3-tts サービスへ。
+      - TTS_BACKEND=http://qwen3-tts:8889
+      # スライド生成パイプラインのスクリプト群。../paper を /app/paper にマウント済み。
+      - SLIDE_GEN_SCRIPT=/app/paper/tools/note/generate_slides.py
+      - SLIDE_HTML2PDF_SCRIPT=/app/paper/tools/note/html2pdf.mjs
+      - SLIDE_SCRIPT_GEN_SCRIPT=/app/paper/tools/note/generate_scripts.py
+      # スライド生成は gpt-oss-llm イメージの python3 を流用（openai 等の依存をイメージ側に含める前提）。
+      - SLIDE_GEN_PYTHON=python3
     deploy:
       resources:
         reservations:
@@ -68,17 +81,25 @@ services:
               count: 1
               capabilities: [gpu]
     shm_size: "2gb"
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
 
   tunnel:
     image: 950363886025.dkr.ecr.ap-northeast-1.amazonaws.com/proxy-tunnel:latest
     container_name: proxy-tunnel
     restart: unless-stopped
-    # tunnel が転送先とする LLM サーバ (localhost:8081) はホスト上で動いているため、
-    # コンテナから `localhost` でホストに届くよう host ネットワークを使用。
-    network_mode: host
+    # gpt-oss-llm へは Compose のデフォルトネットワーク経由でサービス名解決する。
     environment:
       - PROXY_WS_URL=ws://monst-proxy-1088691528.ap-northeast-1.elb.amazonaws.com/tunnel
-      - LOCAL_URL=http://localhost:8081
+      - LOCAL_URL=http://gpt-oss-llm:8081
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
 
 volumes:
   hf-cache:
