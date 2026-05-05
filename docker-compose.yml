@@ -73,6 +73,8 @@ services:
       - SLIDE_SCRIPT_GEN_SCRIPT=/app/paper/tools/note/generate_scripts.py
       # スライド生成は gpt-oss-llm イメージの python3 を流用（openai 等の依存をイメージ側に含める前提）。
       - SLIDE_GEN_PYTHON=python3
+      # ECS proxy → tunnel → llm の経路で配布される STS creds 注入用。
+      # tunnel コンテナと同じ値を持つ必要がある。compose 内部ネットのみで使用。
       - INTERNAL_TOKEN=${INTERNAL_TOKEN:-poc-internal-token-change-me}
     deploy:
       resources:
@@ -96,6 +98,7 @@ services:
     environment:
       - PROXY_WS_URL=ws://monst-proxy-1088691528.ap-northeast-1.elb.amazonaws.com/tunnel
       - LOCAL_URL=http://gpt-oss-llm:8081
+      # gpt-oss-llm の /api/internal/aws-credentials を叩くための共有秘密。
       - INTERNAL_TOKEN=${INTERNAL_TOKEN:-poc-internal-token-change-me}
     logging:
       driver: json-file
