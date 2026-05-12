@@ -54,17 +54,17 @@ services:
     ports:
       - "8081:8081"
     volumes:
-      - ../gpt-oss/professor_data:/app/professor_data
-      - ../gpt-oss/.apikeys.txt:/app/.apikeys.txt
-      - ../gpt-oss/.custom-auth.txt:/app/.custom-auth.txt
+      - ./professor_data:/app/professor_data
+      - ./.apikeys.txt:/app/.apikeys.txt
+      - ./.custom-auth.txt:/app/.custom-auth.txt
       - ../paper:/app/paper
       - hf-cache:/root/.cache/huggingface
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - HF_HOME=/root/.cache/huggingface
-      - LAB_ID=lab-A
-      - LAB_NAME=ネットワークチーム
-      - LAB_SUMMARY=IPSJ/OS/DPS の最新 + 研究報告論文を中心
+      - LAB_ID=lab-B
+      - LAB_NAME=Arxiv(A)チーム
+      - LAB_SUMMARY=Arxiv(cs.* and(WebRTC or QUIC or HTTP/3))
       # TTS は Compose 内部ネットワーク経由で qwen3-tts サービスへ。
       - TTS_BACKEND=http://qwen3-tts:8889
       # スライド生成パイプラインのスクリプト群。../paper を /app/paper にマウント済み。
@@ -73,6 +73,7 @@ services:
       - SLIDE_SCRIPT_GEN_SCRIPT=/app/paper/tools/note/generate_scripts.py
       # スライド生成は gpt-oss-llm イメージの python3 を流用（openai 等の依存をイメージ側に含める前提）。
       - SLIDE_GEN_PYTHON=python3
+      - INTERNAL_TOKEN=${INTERNAL_TOKEN:-poc-internal-token-change-me}
     deploy:
       resources:
         reservations:
@@ -95,6 +96,7 @@ services:
     environment:
       - PROXY_WS_URL=ws://monst-proxy-1088691528.ap-northeast-1.elb.amazonaws.com/tunnel
       - LOCAL_URL=http://gpt-oss-llm:8081
+      - INTERNAL_TOKEN=${INTERNAL_TOKEN:-poc-internal-token-change-me}
     logging:
       driver: json-file
       options:
