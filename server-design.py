@@ -962,38 +962,49 @@ class TTSHandler(BaseHTTPRequestHandler):
 
         model_language = LANG_TO_MODEL[out_lang]
 
-        # Send headers immediately so client can start reading chunks
+        t0 = time.time()
+        gen = TTS.stream_generate_voice_clone(
+            text=text,
+            language=model_language,
+            voice_clone_prompt=prompt_items,
+            emit_every_frames=8,
+            decode_window_frames=80,
+            overlap_samples=0,
+        )
+
+        # Peek first chunk to learn the actual sample rate before sending headers
+        try:
+            first_chunk, sr = next(gen)
+        except StopIteration:
+            self._send_json({"error": "TTS produced no audio"}, 500)
+            return
+
+        print(f"[stream]   START model_lang={model_language} key={key} sr={sr}")
+
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("X-Sample-Rate", "24000")
+        self.send_header("X-Sample-Rate", str(sr))
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
 
-        print(f"[stream]   START model_lang={model_language} key={key}")
-        t0 = time.time()
-        t_first = None
+        t_first = time.time()
+        print(f"[stream]   FIRST CHUNK in {t_first - t0:.2f}s  ({len(first_chunk)} samples, sr={sr})")
+
+        def write_chunk(c):
+            pcm_int16 = np.clip(c, -1.0, 1.0)
+            pcm_int16 = (pcm_int16 * 32767).astype(np.int16)
+            self.wfile.write(pcm_int16.tobytes())
+            self.wfile.flush()
+
         chunk_count = 0
         total_samples = 0
-
         try:
-            for chunk, sr in TTS.stream_generate_voice_clone(
-                text=text,
-                language=model_language,
-                voice_clone_prompt=prompt_items,
-                emit_every_frames=8,
-                decode_window_frames=80,
-                overlap_samples=0,
-            ):
-                if t_first is None:
-                    t_first = time.time()
-                    print(f"[stream]   FIRST CHUNK in {t_first - t0:.2f}s  ({len(chunk)} samples)")
-
-                # Convert float32 -> int16 PCM bytes
-                pcm_int16 = np.clip(chunk, -1.0, 1.0)
-                pcm_int16 = (pcm_int16 * 32767).astype(np.int16)
-                self.wfile.write(pcm_int16.tobytes())
-                self.wfile.flush()
+            write_chunk(first_chunk)
+            chunk_count += 1
+            total_samples += len(first_chunk)
+            for chunk, _sr in gen:
+                write_chunk(chunk)
                 chunk_count += 1
                 total_samples += len(chunk)
         except BrokenPipeError:
@@ -1003,12 +1014,11 @@ class TTSHandler(BaseHTTPRequestHandler):
         elapsed = time.time() - t0
         elapsed_ms = elapsed * 1000
         PERF_STREAM_TOTAL.record(elapsed_ms)
-        if t_first is not None:
-            first_ms = (t_first - t0) * 1000
-            PERF_STREAM_FIRST.record(first_ms)
-        duration = total_samples / 24000
-        first_latency = (t_first - t0) if t_first else elapsed
-        print(f"[stream]   DONE {elapsed:.2f}s  first={first_latency:.2f}s  chunks={chunk_count}  audio={duration:.1f}s ({total_samples} samples)")
+        first_ms = (t_first - t0) * 1000
+        PERF_STREAM_FIRST.record(first_ms)
+        duration = total_samples / sr
+        first_latency = t_first - t0
+        print(f"[stream]   DONE {elapsed:.2f}s  first={first_latency:.2f}s  chunks={chunk_count}  audio={duration:.1f}s ({total_samples} samples, sr={sr})")
         for stats in (PERF_STREAM_TOTAL, PERF_STREAM_FIRST):
             summary = stats.summary()
             if summary:
