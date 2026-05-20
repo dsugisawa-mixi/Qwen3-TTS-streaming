@@ -20,9 +20,11 @@ import argparse
 import io
 import json
 import math
+import struct
 import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from math import gcd
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
@@ -134,6 +136,14 @@ class PerfStats:
 PERF_GENERATE = PerfStats("generate")
 PERF_STREAM_TOTAL = PerfStats("stream_total")
 PERF_STREAM_FIRST = PerfStats("stream_first_chunk")
+
+
+# Opus streaming parameters (active only when ?opus=1 on /api/generate_stream).
+# Framing: each packet is written as [BE16 length][opus packet bytes].
+OPUS_SR = 24000
+OPUS_FRAME_MS = 20
+OPUS_FRAME_SAMPLES = OPUS_SR * OPUS_FRAME_MS // 1000  # 480
+OPUS_BITRATE = 24000
 
 
 # ---------------------------------------------------------------------------
@@ -931,8 +941,15 @@ class TTSHandler(BaseHTTPRequestHandler):
         style = body.get("style", "neutral")
         out_lang = body.get("out_lang", "en")
         text = body["text"]
+        opus_raw = body.get("opus", False)
+        if isinstance(opus_raw, bool):
+            use_opus = opus_raw
+        elif isinstance(opus_raw, (int, float)):
+            use_opus = bool(opus_raw)
+        else:
+            use_opus = str(opus_raw).lower() in ("1", "true", "yes", "on")
 
-        print(f"[stream]   REQ  gender={gender} style={style} out={out_lang}")
+        print(f"[stream]   REQ  gender={gender} style={style} out={out_lang} opus={int(use_opus)}")
         print(f"[stream]    TEXT: {text!r}")
 
         if gender not in GENDERS:
@@ -962,6 +979,21 @@ class TTSHandler(BaseHTTPRequestHandler):
 
         model_language = LANG_TO_MODEL[out_lang]
 
+        # Initialize Opus encoder upfront so any failure returns a clean JSON error
+        # before we commit to streaming headers. Existing PCM path is unchanged.
+        opus_encoder = None
+        if use_opus:
+            try:
+                import opuslib
+                opus_encoder = opuslib.Encoder(OPUS_SR, 1, opuslib.APPLICATION_VOIP)
+                opus_encoder.bitrate = OPUS_BITRATE
+            except Exception as e:
+                self._send_json(
+                    {"error": f"Opus encoder unavailable: {type(e).__name__}: {e}"},
+                    500,
+                )
+                return
+
         t0 = time.time()
         gen = TTS.stream_generate_voice_clone(
             text=text,
@@ -979,11 +1011,21 @@ class TTSHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "TTS produced no audio"}, 500)
             return
 
-        print(f"[stream]   START model_lang={model_language} key={key} sr={sr}")
+        print(f"[stream]   START model_lang={model_language} key={key} sr={sr} opus={int(use_opus)}")
 
         self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("X-Sample-Rate", str(sr))
+        if use_opus:
+            self.send_header("Content-Type", "audio/opus")
+            self.send_header("X-Audio-Format", "opus_be16len")
+            self.send_header("X-Opus-Sample-Rate", str(OPUS_SR))
+            self.send_header("X-Opus-Frame-Ms", str(OPUS_FRAME_MS))
+            self.send_header("X-Opus-Bitrate", str(OPUS_BITRATE))
+            self.send_header("X-Opus-Channels", "1")
+            self.send_header("X-Source-Sample-Rate", str(sr))
+        else:
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("X-Audio-Format", "pcm_s16le")
+            self.send_header("X-Sample-Rate", str(sr))
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
@@ -991,11 +1033,51 @@ class TTSHandler(BaseHTTPRequestHandler):
         t_first = time.time()
         print(f"[stream]   FIRST CHUNK in {t_first - t0:.2f}s  ({len(first_chunk)} samples, sr={sr})")
 
-        def write_chunk(c):
-            pcm_int16 = np.clip(c, -1.0, 1.0)
-            pcm_int16 = (pcm_int16 * 32767).astype(np.int16)
-            self.wfile.write(pcm_int16.tobytes())
-            self.wfile.flush()
+        if use_opus:
+            from scipy import signal as _sps
+            need_resample = int(sr) != OPUS_SR
+            if need_resample:
+                _g = gcd(int(sr), OPUS_SR)
+                _up, _down = OPUS_SR // _g, int(sr) // _g
+            opus_buf = np.zeros(0, dtype=np.float32)
+
+            def write_chunk(c):
+                nonlocal opus_buf
+                arr = np.asarray(c, dtype=np.float32)
+                if need_resample:
+                    arr = _sps.resample_poly(arr, _up, _down).astype(np.float32)
+                buf = np.concatenate([opus_buf, arr])
+                offset = 0
+                while len(buf) - offset >= OPUS_FRAME_SAMPLES:
+                    frame = buf[offset:offset + OPUS_FRAME_SAMPLES]
+                    offset += OPUS_FRAME_SAMPLES
+                    pcm_i16 = (np.clip(frame, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+                    packet = opus_encoder.encode(pcm_i16, OPUS_FRAME_SAMPLES)
+                    self.wfile.write(struct.pack(">H", len(packet)))
+                    self.wfile.write(packet)
+                opus_buf = buf[offset:].copy()
+                self.wfile.flush()
+
+            def finalize():
+                nonlocal opus_buf
+                if len(opus_buf) > 0:
+                    pad = OPUS_FRAME_SAMPLES - len(opus_buf)
+                    tail = np.concatenate([opus_buf, np.zeros(pad, dtype=np.float32)])
+                    pcm_i16 = (np.clip(tail, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+                    packet = opus_encoder.encode(pcm_i16, OPUS_FRAME_SAMPLES)
+                    self.wfile.write(struct.pack(">H", len(packet)))
+                    self.wfile.write(packet)
+                    opus_buf = np.zeros(0, dtype=np.float32)
+                    self.wfile.flush()
+        else:
+            def write_chunk(c):
+                pcm_int16 = np.clip(c, -1.0, 1.0)
+                pcm_int16 = (pcm_int16 * 32767).astype(np.int16)
+                self.wfile.write(pcm_int16.tobytes())
+                self.wfile.flush()
+
+            def finalize():
+                pass
 
         chunk_count = 0
         total_samples = 0
@@ -1007,6 +1089,7 @@ class TTSHandler(BaseHTTPRequestHandler):
                 write_chunk(chunk)
                 chunk_count += 1
                 total_samples += len(chunk)
+            finalize()
         except BrokenPipeError:
             print(f"[stream]   Client disconnected after {chunk_count} chunks")
             return

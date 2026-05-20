@@ -6,7 +6,7 @@ RUN rm -rf /var/lib/apt/lists/* \
     && apt-get clean \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        wget git build-essential libsox-dev sox \
+        wget git build-essential libsox-dev sox libopus0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Use bash for all subsequent RUN steps so `source` and `conda activate` work
@@ -46,7 +46,8 @@ WORKDIR /app
 COPY pyproject.toml MANIFEST.in README.md ./
 COPY qwen_tts/ ./qwen_tts/
 RUN source /opt/conda/etc/profile.d/conda.sh && conda activate qwen3-tts \
-    && python -m pip install --no-cache-dir .
+    && python -m pip install --no-cache-dir . \
+    && python -m pip install --no-cache-dir opuslib==3.0.1
 
 # --- Server files ---
 COPY server-design.py server-design.html ./
