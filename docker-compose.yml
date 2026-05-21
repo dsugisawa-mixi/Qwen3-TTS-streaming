@@ -57,6 +57,7 @@ services:
       - ./professor_data:/app/professor_data
       - ./.apikeys.txt:/app/.apikeys.txt
       - ./.custom-auth.txt:/app/.custom-auth.txt
+      - ../gpt-oss/.devices.txt:/app/.devices.txt
       - ../paper:/app/paper
       - hf-cache:/root/.cache/huggingface
     environment:
