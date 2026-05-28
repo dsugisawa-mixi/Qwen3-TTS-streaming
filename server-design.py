@@ -140,10 +140,10 @@ PERF_STREAM_FIRST = PerfStats("stream_first_chunk")
 
 # Opus streaming parameters (active only when ?opus=1 on /api/generate_stream).
 # Framing: each packet is written as [BE16 length][opus packet bytes].
-OPUS_SR = 24000
+OPUS_SR = 16000
 OPUS_FRAME_MS = 20
-OPUS_FRAME_SAMPLES = OPUS_SR * OPUS_FRAME_MS // 1000  # 480
-OPUS_BITRATE = 24000
+OPUS_FRAME_SAMPLES = OPUS_SR * OPUS_FRAME_MS // 1000  # 320
+OPUS_BITRATE = 16000
 
 
 # ---------------------------------------------------------------------------
